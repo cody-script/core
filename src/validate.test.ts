@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { createEngine } from "./engine.js";
 import { CodyScriptError } from "./errors.js";
-import { pointer } from "./schema.js";
-import { m, math, op, ref, set, val, when } from "./test/build.js";
+import { m, math, op, ref, ret, set, val, when } from "./test/build.js";
+import { pointer } from "./validate.js";
 
 const engine = createEngine({ executors: { math } });
 
@@ -49,6 +49,46 @@ describe("validation", () => {
 			{ $: "m()", do: [{ $: "if", if: val(1), do: [], el: {} }] },
 			"/do/0/el",
 		],
+		["a missing $", { val: 1 }, "/$"],
+		["an instruction that isn't an object", m("set" as never), "/do/0"],
+		["an input where an instruction belongs", m(val(1) as never), "/do/0/$"],
+		["a non-string tag", { $: "val", val: 1, tag: 1 }, "/tag"],
+		["a non-string method id", { $: "m()", do: [], id: 1 }, "/id"],
+		[
+			"a non-string op id",
+			{ $: "op", op: { id: 1 }, exe: { id: "math" } },
+			"/op/id",
+		],
+		[
+			"op that isn't an object",
+			{ $: "op", op: "add", exe: { id: "math" } },
+			"/op",
+		],
+		[
+			"a map that is a list",
+			{ $: "op", op: { id: "add", map: [] }, exe: { id: "math" } },
+			"/op/map",
+		],
+		["a bad map argument", op("math", "add", { a: 1 as never }), "/op/map/a"],
+		[
+			"an unknown op field",
+			{ $: "op", op: { id: "add", args: {} }, exe: { id: "math" } },
+			"/op/args",
+		],
+		[
+			"an unknown exe field",
+			{ $: "op", op: { id: "add" }, exe: { id: "math", fn: 1 } },
+			"/exe/fn",
+		],
+		["missing exe", { $: "op", op: { id: "add" } }, "/exe"],
+		[
+			"a non-JSON exe arg",
+			op("math", "add", undefined, new Date() as never),
+			"/exe/arg",
+		],
+		["a Date is not JSON", val(new Date() as never), "/val"],
+		["a class instance is not JSON", val(new (class {})() as never), "/val"],
+		["a nested non-JSON value", val({ a: [1, Number.NaN] }), "/val/a/1"],
 	])("refuses %s", (_, program, path) => {
 		const error = compileError(program);
 		expect(error.code).toBe("invalid_program");
@@ -62,6 +102,33 @@ describe("validation", () => {
 			"/do/0/set",
 			"/do/1/ret",
 		]);
+	});
+
+	test("an unknown executor carries its node's tag", () => {
+		const error = compileError({ ...op("nope", "x"), tag: "n7" });
+		expect(error.tag).toBe("n7");
+		expect(error.message).toBe('Unknown executor "nope" at /exe/id (tag n7)');
+	});
+
+	test("shape problems and unknown executors are reported together", () => {
+		const error = compileError(m(set("x", op("nope", "x")), set("", val(1))));
+		expect(error.code).toBe("unknown_executor");
+		expect(error.issues?.map((i) => i.path)).toEqual([
+			"/do/0/to/exe/id",
+			"/do/1/set",
+		]);
+	});
+
+	test("objects with no prototype are JSON too", () => {
+		const bare = Object.assign(Object.create(null), { a: 1 });
+		expect(() => engine.compile(val(bare))).not.toThrow();
+	});
+
+	test("changing the source after compile doesn't change the program", async () => {
+		const source = m(ret(val(1))) as { do: { ret: { val: unknown } }[] };
+		const compiled = engine.compile(source);
+		source.do[0]!.ret.val = () => "smuggled";
+		expect((await compiled.run()).value).toBe(1);
 	});
 
 	test("refuses a program nested past maxDepth before validating it", () => {

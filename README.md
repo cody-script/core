@@ -7,7 +7,8 @@ logic: variables, conditions, loops and calls to those executors. Nothing else
 is reachable.
 
 It is meant for rules that live in data rather than code: a tenant's CSV
-mapping, a validation rule, a pipeline step.
+mapping, a validation rule, a pipeline step. It has no runtime dependencies
+and runs unchanged in Workers, Node (18+) and Bun.
 
 It is published privately to GitHub Packages. A consumer needs the scope
 mapped to that registry and a token with `read:packages`:
@@ -136,10 +137,10 @@ compiled.run({ variables?, signal? }): Promise<RunResult>
 - **Errors** — every failure is a `CodyScriptError` with a `code`
   (`invalid_program`, `unknown_executor`, `undefined_variable`,
   `executor_failed`, `step_limit`, `aborted`), a JSON Pointer `path` into the
-  program, the node's `tag`, and for `invalid_program` every `issue` found.
-- **Schemas** — `InputSchema`, `InstructionSchema` and `ValueSchema` are the
-  [Valibot](https://valibot.dev) schemas `compile` uses, for hosts that
-  embed programs in larger config.
+  program, the node's `tag`, and for `invalid_program` / `unknown_executor`
+  every `issue` found.
+- **Isolation** — `compile` copies the program after validating it, so
+  later changes to the source object can't reach a validated program.
 
 ## Safety model
 

@@ -1,5 +1,4 @@
 import { CodyScriptError } from "./errors.js";
-import { escapeKey, parseProgram } from "./schema.js";
 import type {
 	Executor,
 	Input,
@@ -10,6 +9,10 @@ import type {
 	Signal,
 	Value,
 } from "./types.js";
+import { escapeKey, validate } from "./validate.js";
+
+// Global in every supported runtime (Workers, Node 17+, Bun) but not in the ES lib.
+declare function structuredClone<T>(value: T): T;
 
 const DEFAULT_MAX_STEPS = 100_000;
 const DEFAULT_MAX_DEPTH = 128;
@@ -65,8 +68,10 @@ export function createEngine(options: EngineOptions = {}): Engine {
 	const maxDepth = options.limits?.maxDepth ?? DEFAULT_MAX_DEPTH;
 
 	const compile = (raw: unknown): CompiledProgram => {
-		const program = parseProgram(raw, maxDepth);
-		checkExecutors(program, executors);
+		// Validate, then copy: later changes to `raw` can't reach a validated program.
+		const program = structuredClone(
+			validate(raw, maxDepth, (id) => executors.has(id)),
+		);
 		return {
 			program,
 			run: (runOptions = {}) =>
@@ -176,7 +181,7 @@ class Run {
 		scope: Scope,
 		path: string,
 	): Promise<Value> {
-		// Checked at compile time; the Map is the engine's own, so this cannot miss.
+		// Checked by validate(); the Map is the engine's own, so this cannot miss.
 		const executor = this.executors.get(input.exe.id)!;
 		let args: Variables | undefined;
 		if (input.op.map) {
@@ -264,46 +269,4 @@ class Run {
 				return;
 		}
 	}
-}
-
-/** Refuses a program naming an executor the engine doesn't have, before it runs. */
-function checkExecutors(
-	program: Program,
-	executors: Map<string, Executor>,
-): void {
-	const visitInput = (input: Input, path: string): void => {
-		if (input.$ === "op") {
-			if (!executors.has(input.exe.id)) {
-				throw new CodyScriptError(
-					"unknown_executor",
-					`Unknown executor "${input.exe.id}"`,
-					{ path: `${path}/exe/id`, tag: input.tag },
-				);
-			}
-			for (const [arg, from] of Object.entries(input.op.map ?? {})) {
-				visitInput(from, `${path}/op/map/${escapeKey(arg)}`);
-			}
-		} else if (input.$ === "m()") {
-			visitBlock(input.do, `${path}/do`);
-		}
-	};
-	const visitBlock = (list: Instruction[], path: string): void => {
-		list.forEach((ins, i) => {
-			const at = `${path}/${i}`;
-			switch (ins.$) {
-				case "set":
-					return visitInput(ins.to, `${at}/to`);
-				case "ret":
-					return visitInput(ins.ret, `${at}/ret`);
-				case "if":
-					visitInput(ins.if, `${at}/if`);
-					visitBlock(ins.do, `${at}/do`);
-					return visitBlock(ins.el ?? [], `${at}/el`);
-				case "for":
-					visitInput(ins.if, `${at}/if`);
-					return visitBlock(ins.do, `${at}/do`);
-			}
-		});
-	};
-	visitInput(program, "");
 }
