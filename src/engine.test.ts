@@ -45,6 +45,33 @@ describe("inputs", () => {
 		expect(error.message).toBe('Variable "nope" is not defined (tag t1)');
 	});
 
+	test("a bare number, string, boolean or null is its own value", async () => {
+		for (const v of [0, 2.5, "", "fee", true, false, null]) {
+			expect((await engine.run(v)).value).toBe(v);
+		}
+	});
+
+	test("a bare string is text, never a variable", async () => {
+		const { value } = await engine.run(m(set("fee", 1), ret("fee")));
+		expect(value).toBe("fee");
+	});
+
+	test("literals work anywhere an input does", async () => {
+		const program = m(
+			set("i", 0),
+			loop(op("math", "lt", { a: ref("i"), b: 3 }), [
+				set("i", op("math", "add", { a: ref("i"), b: 1 })),
+			]),
+			when(false, [ret("no")]),
+			ret(ref("i")),
+		);
+		expect((await engine.run(program)).value).toBe(3);
+	});
+
+	test("a literal is a step", async () => {
+		expect((await engine.run(m(set("a", 1)))).steps).toBe(2);
+	});
+
 	test("a method with no return is null", async () => {
 		expect((await engine.run(m())).value).toBeNull();
 	});
@@ -232,7 +259,7 @@ describe("compile", () => {
 		);
 		expect((await compiled.run({ variables: { n: 1 } })).value).toBe(2);
 		expect((await compiled.run({ variables: { n: 10 } })).value).toBe(11);
-		expect(compiled.program.$).toBe("m()");
+		expect(compiled.program).toMatchObject({ $: "m()" });
 	});
 
 	test("input variables are copied, not mutated", async () => {

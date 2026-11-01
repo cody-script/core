@@ -34,19 +34,11 @@ A rule that cleans a CSV row's `Name` column and refuses a blank one:
     {
       "$": "set",
       "set": "name",
-      "to": {
-        "$": "op",
-        "op": { "id": "trim", "map": { "value": { "$": "ref", "ref": "Name" } } },
-        "exe": { "id": "text" }
-      }
+      "to": { "$": "op", "op": "text.trim", "map": { "value": { "$": "ref", "ref": "Name" } } }
     },
     {
       "$": "if",
-      "if": {
-        "$": "op",
-        "op": { "id": "empty", "map": { "value": { "$": "ref", "ref": "name" } } },
-        "exe": { "id": "text" }
-      },
+      "if": { "$": "op", "op": "text.empty", "map": { "value": { "$": "ref", "ref": "name" } } },
       "do": [{ "$": "ret", "ret": { "$": "val", "val": { "error": "Name is required" } } }],
       "tag": "name-required"
     },
@@ -80,18 +72,27 @@ a broken rule fails when it's saved — not halfway through a file.
 
 ## The language
 
-Every node is a JSON object whose `$` says what it is. Any node may carry a
-`tag`: an opaque label (an editor's node id, a rule name) echoed back in
-errors. Unknown fields are refused, so a typo is an error rather than ignored.
+Programs are kept small on purpose — they are stored and sent, and a large
+rule set adds up — so keys are short. Every node is a JSON object whose `$`
+says what it is. Any node may carry a `tag`: an opaque label (an editor's
+node id, a rule name) echoed back in errors. Unknown fields are refused, so a
+typo is an error rather than ignored.
 
 ### Inputs — produce a value
 
-| `$` | Shape | Value |
+| Input | Shape | Value |
 |---|---|---|
-| `val` | `{ "$": "val", "val": <json> }` | The literal. |
+| literal | `42`, `"text"`, `true`, `null` | Itself. A bare string is text, **never** a variable. |
+| `val` | `{ "$": "val", "val": <json> }` | Any value; needed only for objects and arrays. |
 | `ref` | `{ "$": "ref", "ref": "name" }` | The variable. Undefined → `undefined_variable` error. |
-| `op` | `{ "$": "op", "op": { "id", "map"? }, "exe": { "id", "arg"? } }` | Calls executor `exe.id` with `{ op: op.id, arg: exe.arg, input: <map resolved> }`. |
-| `m()` | `{ "$": "m()", "do": [<instruction>…], "id"? }` | Runs the block in a new scope; its value is what it `ret`urns, else `null`. |
+| `op` | `{ "$": "op", "op": "text.trim", "map"?: {…}, "arg"?: <json> }` | Calls an executor (below). |
+| `m()` | `{ "$": "m()", "do": [<instruction>…] }` | Runs the block in a new scope; its value is what it `ret`urns, else `null`. |
+
+**Calls.** `op` is `"<executor>.<operation>"`, split at the first dot:
+`"text.trim"` calls executor `text` with `{ op: "trim", input, arg }`, where
+`input` is `map` with each argument resolved and `arg` is passed as written.
+Executor ids can't contain a dot; operation names can (`"num.round.up"` is
+operation `round.up`).
 
 ### Instructions — do something
 
@@ -101,6 +102,39 @@ errors. Unknown fields are refused, so a typo is an error rather than ignored.
 | `ret` | `{ "$": "ret", "ret": <input> }` | Ends the enclosing `m()` with that value. |
 | `if` | `{ "$": "if", "if": <input>, "do": […], "el"?: […] }` | Runs `do` if the test is truthy, else `el`. |
 | `for` | `{ "$": "for", "if": <input>, "do": […] }` | Runs `do` while the test is truthy. |
+
+A fuller example — a 3% fee on a CSV `Amount`, capped at 300:
+
+```jsonc
+{ "$": "m()", "do": [
+  { "$": "set", "set": "amount", "to": { "$": "op", "op": "num.parse", "map": { "value": { "$": "ref", "ref": "Amount" } } } },
+  { "$": "if", "if": { "$": "op", "op": "cmp.lt", "map": { "a": { "$": "ref", "ref": "amount" }, "b": 0 } },
+    "do": [{ "$": "ret", "ret": { "$": "val", "val": { "error": "Amount must be positive" } } }] },
+  { "$": "set", "set": "fee", "to": { "$": "op", "op": "math.mul", "map": { "a": { "$": "ref", "ref": "amount" }, "b": 0.03 } } },
+  { "$": "if", "if": { "$": "op", "op": "cmp.gt", "map": { "a": { "$": "ref", "ref": "fee" }, "b": 300 } },
+    "do": [{ "$": "set", "set": "fee", "to": 300 }] },
+  { "$": "ret", "ret": { "$": "ref", "ref": "fee" } }
+] }
+```
+
+### Writing programs by hand
+
+[`schema.json`](schema.json) (shipped as `@cody-script/engine/schema.json`) is
+a JSON Schema for the language. Point your editor at it for completion and
+inline errors — in VS Code, `.vscode/settings.json`:
+
+```jsonc
+{ "json.schemas": [{ "fileMatch": ["*.cody.json"], "url": "./node_modules/@cody-script/engine/schema.json" }] }
+```
+
+It checks shape only; `compile` also checks executor ids, nesting depth and
+that numbers are finite. A test keeps the two in agreement.
+
+### Storing programs
+
+Store programs minified, and compress them if size matters: gzip
+(`CompressionStream("gzip")` in Workers) shrinks the fee example above from
+557 bytes to 217, far more than any key-shortening could.
 
 ### Semantics
 
@@ -150,12 +184,25 @@ its inputs as untrusted. The engine refuses malformed or over-deep programs
 before running them, bounds every run by steps, keeps variables and executor
 lookups off `Object.prototype`, and never evaluates strings as code.
 
-## Upgrading from `@cody-pope/codyscript` 0.0.x
+## Upgrading
 
-This package succeeds `@cody-pope/codyscript`. The JSON format is unchanged except that `tag` and a method's `id` are now
-optional and `null` is a value. The host API is new:
+### 0.1 → 0.2 (format change)
 
-| 0.0.x | 0.1 |
+No rules were stored in the 0.1 format, so 0.2 reads only the new one.
+
+| 0.1 | 0.2 |
+|---|---|
+| `{ "$": "op", "op": { "id": "trim", "map": M }, "exe": { "id": "text", "arg": A } }` | `{ "$": "op", "op": "text.trim", "map": M, "arg": A }` |
+| `{ "$": "val", "val": 5 }` | `5` (the old form still works) |
+| `{ "$": "m()", "id": "main", … }` | no `id`; use `tag` |
+| `InputSchema` / `InstructionSchema` / `ValueSchema` | `schema.json` |
+| unknown-executor error path `…/exe/id` | `…/op` |
+
+### From `@cody-pope/codyscript` 0.0.x
+
+This package succeeds `@cody-pope/codyscript`; apply the table above as well.
+
+| 0.0.x | 0.2 |
 |---|---|
 | `Executors.register("id", fn)` (global) | `createEngine({ executors: { id: fn } })` |
 | executor returns `{ value }` | executor returns the value |

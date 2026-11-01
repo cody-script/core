@@ -1,19 +1,29 @@
-import type { Executor, Input, Instruction, Value } from "../types.js";
+import type {
+	Constant,
+	Executor,
+	Input,
+	Instruction,
+	Method,
+	Operation,
+	Reference,
+	Value,
+} from "../types.js";
 
 /** Terse builders so tests read like programs. */
-export const val = (v: Value): Input => ({ $: "val", val: v });
-export const ref = (name: string): Input => ({ $: "ref", ref: name });
+export const val = (v: Value): Constant => ({ $: "val", val: v });
+export const ref = (name: string): Reference => ({ $: "ref", ref: name });
 export const op = (
 	exe: string,
 	id: string,
 	map?: { [k: string]: Input },
 	arg?: Value,
-): Input => ({
+): Operation => ({
 	$: "op",
-	op: { id, ...(map && { map }) },
-	exe: { id: exe, ...(arg !== undefined && { arg }) },
+	op: `${exe}.${id}`,
+	...(map && { map }),
+	...(arg !== undefined && { arg }),
 });
-export const m = (...body: Instruction[]): Input => ({ $: "m()", do: body });
+export const m = (...body: Instruction[]): Method => ({ $: "m()", do: body });
 export const set = (name: string, to: Input): Instruction => ({
 	$: "set",
 	set: name,

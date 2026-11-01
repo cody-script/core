@@ -4,7 +4,9 @@ import type {
 	Input,
 	Instruction,
 	Limits,
+	Literal,
 	Method,
+	Operation,
 	Program,
 	Signal,
 	Value,
@@ -49,7 +51,7 @@ export type Engine = {
 };
 
 export type EngineOptions = {
-	/** The operations programs may call, by `exe.id`. Nothing else is reachable. */
+	/** The executors programs may call, by the id before the dot in `op`. Nothing else is reachable. */
 	executors?: { [id: string]: Executor } | Map<string, Executor>;
 	limits?: Limits;
 };
@@ -108,6 +110,10 @@ class Scope {
 
 type Frame = { scope: Scope; done: boolean; result: Value };
 
+/** A node is an object; anything else is a literal. */
+const isNode = (input: Input): input is Exclude<Input, Literal> =>
+	typeof input === "object" && input !== null;
+
 /** JS truthiness: `false`, `0`, `""` and `null` are false; everything else, including `[]` and `{}`, is true. */
 const truthy = (value: Value): boolean => Boolean(value);
 
@@ -126,7 +132,7 @@ class Run {
 			scope.set(name, value);
 		// A top-level method runs in the root scope, so its assignments are the result's variables.
 		const value =
-			program.$ === "m()"
+			isNode(program) && program.$ === "m()"
 				? await this.method(program, scope, "")
 				: await this.resolve(program, scope, "");
 		return { value, variables: scope.toObject(), steps: this.steps };
@@ -154,6 +160,10 @@ class Run {
 		scope: Scope,
 		path: string,
 	): Promise<Value> {
+		if (!isNode(input)) {
+			this.step(path, undefined);
+			return input;
+		}
 		this.step(path, input.tag);
 		switch (input.$) {
 			case "val":
@@ -177,29 +187,32 @@ class Run {
 	}
 
 	private async operation(
-		input: Extract<Input, { $: "op" }>,
+		input: Operation,
 		scope: Scope,
 		path: string,
 	): Promise<Value> {
+		const dot = input.op.indexOf(".");
+		const exe = input.op.slice(0, dot);
+		const op = input.op.slice(dot + 1);
 		// Checked by validate(); the Map is the engine's own, so this cannot miss.
-		const executor = this.executors.get(input.exe.id)!;
+		const executor = this.executors.get(exe)!;
 		let args: Variables | undefined;
-		if (input.op.map) {
+		if (input.map) {
 			args = {};
 			// In order, one at a time: arguments may have side effects.
-			for (const [arg, from] of Object.entries(input.op.map)) {
+			for (const [arg, from] of Object.entries(input.map)) {
 				const value = await this.resolve(
 					from,
 					scope,
-					`${path}/op/map/${escapeKey(arg)}`,
+					`${path}/map/${escapeKey(arg)}`,
 				);
 				args[arg] = value;
 			}
 		}
 		try {
 			const result = await executor({
-				op: input.op.id,
-				...(input.exe.arg !== undefined && { arg: input.exe.arg }),
+				op,
+				...(input.arg !== undefined && { arg: input.arg }),
 				...(args && { input: args }),
 				...(this.signal && { signal: this.signal }),
 			});
@@ -209,7 +222,7 @@ class Run {
 			const reason = cause instanceof Error ? cause.message : String(cause);
 			throw new CodyScriptError(
 				"executor_failed",
-				`Executor "${input.exe.id}" failed on "${input.op.id}": ${reason}`,
+				`Executor "${exe}" failed on "${op}": ${reason}`,
 				{ path, tag: input.tag, cause },
 			);
 		}
