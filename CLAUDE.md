@@ -22,21 +22,23 @@ bun run build           # tsc → dist/
 ```
 src/
   types.ts    # The language (Value, Input, Instruction) and host types
-  schema.ts   # Valibot schemas + preflight (depth, reserved keys)
+  validate.ts # One walk: shape, JSON values, depth, reserved keys, executor ids
   engine.ts   # createEngine → compile → run; scopes, steps, errors
   errors.ts   # CodyScriptError and its codes
   index.ts    # Public surface — keep it small
   test/       # Test builders (not shipped)
 ```
 
-Runtime dependency: `valibot` only. Must run unchanged in Workers, Node and
-Bun — no Node built-ins outside tests.
+**Zero runtime dependencies** — keep it that way; the validator is
+hand-written for exactly this reason (Valibot was ~60% of the bundle). The
+family's "use Valibot" rule is for apps, not this library. Must run unchanged
+in Workers, Node and Bun — no Node built-ins outside tests.
 
 ## Rules
 
-- **Programs are untrusted.** Every new node type needs: a schema entry
-  (`strictObject`), an executor-id walk in `checkExecutors` if it can hold
-  inputs, a `step()` per evaluation, and tests for its error paths.
+- **Programs are untrusted.** Every new node type needs: its fields in
+  `INPUTS`/`INSTRUCTIONS` and a case in `validate.ts`, a case in the engine
+  with a `step()` per evaluation, and tests for its error paths.
 - **No global state.** Executors belong to an engine.
 - **Variables and lookups use `Map`**, never plain objects keyed by program
   strings.

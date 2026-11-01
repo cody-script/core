@@ -35,9 +35,6 @@
 		"check:fix": "biome check --write .",
 		"prepublishOnly": "bun run check && bun run type-check && bun run test && bun run build"
 	},
-	"dependencies": {
-		"valibot": "^1.5.0"
-	},
 	"devDependencies": {
 		"@biomejs/biome": "1.9.4",
 		"@types/node": "^22.20.5",

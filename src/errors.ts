@@ -15,7 +15,7 @@ export class CodyScriptError extends Error {
 	readonly code: ErrorCode;
 	readonly path: string;
 	readonly tag?: string;
-	/** For `invalid_program`: every problem found, not just the first. */
+	/** For `invalid_program` / `unknown_executor`: every problem found, not just the first. */
 	readonly issues?: { path: string; message: string }[];
 
 	constructor(
