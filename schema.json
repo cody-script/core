@@ -1,0 +1,154 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://github.com/cody-script/engine/schema.json",
+	"title": "CodyScript program",
+	"description": "A program is an input: a literal or an input node, usually a method (\"m()\"). The engine's compile() also checks executor ids, nesting depth and finite numbers.",
+	"$ref": "#/$defs/input",
+	"$defs": {
+		"literal": {
+			"description": "A bare number, string, boolean or null is its own value. A string is text, never a variable.",
+			"type": ["null", "boolean", "number", "string"]
+		},
+		"input": {
+			"anyOf": [
+				{ "$ref": "#/$defs/literal" },
+				{ "$ref": "#/$defs/val" },
+				{ "$ref": "#/$defs/ref" },
+				{ "$ref": "#/$defs/op" },
+				{ "$ref": "#/$defs/m" }
+			]
+		},
+		"instruction": {
+			"anyOf": [
+				{ "$ref": "#/$defs/set" },
+				{ "$ref": "#/$defs/ret" },
+				{ "$ref": "#/$defs/if" },
+				{ "$ref": "#/$defs/for" }
+			]
+		},
+		"block": {
+			"type": "array",
+			"items": { "$ref": "#/$defs/instruction" }
+		},
+		"name": { "type": "string", "minLength": 1 },
+		"tag": {
+			"description": "An opaque label echoed back in errors.",
+			"type": "string"
+		},
+		"key": { "not": { "enum": ["__proto__", "prototype", "constructor"] } },
+		"value": {
+			"description": "Any JSON value. Keys __proto__, prototype and constructor are refused.",
+			"anyOf": [
+				{ "$ref": "#/$defs/literal" },
+				{ "type": "array", "items": { "$ref": "#/$defs/value" } },
+				{
+					"type": "object",
+					"propertyNames": { "$ref": "#/$defs/key" },
+					"additionalProperties": { "$ref": "#/$defs/value" }
+				}
+			]
+		},
+		"val": {
+			"description": "A constant of any type. Only needed for objects and arrays; other values can be written bare.",
+			"type": "object",
+			"required": ["$", "val"],
+			"additionalProperties": false,
+			"properties": {
+				"$": { "const": "val" },
+				"val": { "$ref": "#/$defs/value" },
+				"tag": { "$ref": "#/$defs/tag" }
+			}
+		},
+		"ref": {
+			"description": "Reads a variable.",
+			"type": "object",
+			"required": ["$", "ref"],
+			"additionalProperties": false,
+			"properties": {
+				"$": { "const": "ref" },
+				"ref": { "$ref": "#/$defs/name" },
+				"tag": { "$ref": "#/$defs/tag" }
+			}
+		},
+		"op": {
+			"description": "Calls an executor: \"<executor>.<operation>\", split at the first dot.",
+			"type": "object",
+			"required": ["$", "op"],
+			"additionalProperties": false,
+			"properties": {
+				"$": { "const": "op" },
+				"op": { "type": "string", "pattern": "^[^.]+\\..+$" },
+				"map": {
+					"description": "Computed arguments, resolved in order.",
+					"type": "object",
+					"propertyNames": { "$ref": "#/$defs/key" },
+					"additionalProperties": { "$ref": "#/$defs/input" }
+				},
+				"arg": {
+					"description": "A static argument.",
+					"$ref": "#/$defs/value"
+				},
+				"tag": { "$ref": "#/$defs/tag" }
+			}
+		},
+		"m": {
+			"description": "A block with its own scope; its value is what it returns, else null.",
+			"type": "object",
+			"required": ["$", "do"],
+			"additionalProperties": false,
+			"properties": {
+				"$": { "const": "m()" },
+				"do": { "$ref": "#/$defs/block" },
+				"tag": { "$ref": "#/$defs/tag" }
+			}
+		},
+		"set": {
+			"description": "Assigns a variable in the current scope.",
+			"type": "object",
+			"required": ["$", "set", "to"],
+			"additionalProperties": false,
+			"properties": {
+				"$": { "const": "set" },
+				"set": { "$ref": "#/$defs/name" },
+				"to": { "$ref": "#/$defs/input" },
+				"tag": { "$ref": "#/$defs/tag" }
+			}
+		},
+		"ret": {
+			"description": "Ends the enclosing method with a value.",
+			"type": "object",
+			"required": ["$", "ret"],
+			"additionalProperties": false,
+			"properties": {
+				"$": { "const": "ret" },
+				"ret": { "$ref": "#/$defs/input" },
+				"tag": { "$ref": "#/$defs/tag" }
+			}
+		},
+		"if": {
+			"description": "Runs do when the test is truthy, otherwise el.",
+			"type": "object",
+			"required": ["$", "if", "do"],
+			"additionalProperties": false,
+			"properties": {
+				"$": { "const": "if" },
+				"if": { "$ref": "#/$defs/input" },
+				"do": { "$ref": "#/$defs/block" },
+				"el": { "$ref": "#/$defs/block" },
+				"tag": { "$ref": "#/$defs/tag" }
+			}
+		},
+		"for": {
+			"description": "Runs do while the test is truthy.",
+			"type": "object",
+			"required": ["$", "if", "do"],
+			"additionalProperties": false,
+			"properties": {
+				"$": { "const": "for" },
+				"if": { "$ref": "#/$defs/input" },
+				"do": { "$ref": "#/$defs/block" },
+				"tag": { "$ref": "#/$defs/tag" }
+			}
+		}
+	}
+}

@@ -14,8 +14,8 @@ type Node = { [key: string]: unknown };
 const INPUTS = new Map([
 	["val", ["val"]],
 	["ref", ["ref"]],
-	["op", ["op", "exe"]],
-	["m()", ["do", "id"]],
+	["op", ["op", "map", "arg"]],
+	["m()", ["do"]],
 ]);
 const INSTRUCTIONS = new Map([
 	["set", ["set", "to"]],
@@ -123,34 +123,33 @@ export function validate(
 		v.forEach((ins, i) => node(ins, [...keys, i], INSTRUCTIONS));
 	};
 
-	const input = (v: unknown, keys: Keys): void => node(v, keys, INPUTS);
+	/** A literal (`null`, boolean, finite number, string) or an input node. */
+	const input = (v: unknown, keys: Keys): void => {
+		if (typeof v === "object" && v !== null) node(v, keys, INPUTS);
+		else value(v, keys);
+	};
 
 	const operation = (n: Node, keys: Keys): void => {
-		const op = record(n.op, [...keys, "op"], ["id", "map"]);
-		if (op) {
-			string(op.id, [...keys, "op", "id"]);
-			if (op.map !== undefined) {
-				const map = record(
-					op.map,
-					[...keys, "op", "map"],
-					Object.keys(op.map as object),
-				);
-				for (const [arg, from] of Object.entries(map ?? {}))
-					input(from, [...keys, "op", "map", arg]);
-			}
-		}
-		const exe = record(n.exe, [...keys, "exe"], ["id", "arg"]);
-		if (exe) {
-			const at = [...keys, "exe", "id"];
-			if (name(exe.id, at) && !hasExecutor(exe.id)) {
+		const at = [...keys, "op"];
+		const dot = typeof n.op === "string" ? n.op.indexOf(".") : -1;
+		if (dot < 1 || dot === (n.op as string).length - 1) {
+			fail(at, 'Expected "<executor>.<operation>"');
+		} else {
+			const exe = (n.op as string).slice(0, dot);
+			if (!hasExecutor(exe)) {
 				const tag = typeof n.tag === "string" ? { tag: n.tag } : {};
-				fail(at, `Unknown executor "${exe.id}"`, {
+				fail(at, `Unknown executor "${exe}"`, {
 					code: "unknown_executor",
 					...tag,
 				});
 			}
-			if (exe.arg !== undefined) value(exe.arg, [...keys, "exe", "arg"]);
 		}
+		if (n.map !== undefined) {
+			const map = record(n.map, [...keys, "map"], Object.keys(n.map as object));
+			for (const [arg, from] of Object.entries(map ?? {}))
+				input(from, [...keys, "map", arg]);
+		}
+		if (n.arg !== undefined) value(n.arg, [...keys, "arg"]);
 	};
 
 	function node(v: unknown, keys: Keys, kinds: Map<string, string[]>): void {
@@ -181,7 +180,6 @@ export function validate(
 				operation(n, keys);
 				break;
 			case "m()":
-				if (n.id !== undefined) string(n.id, at("id"));
 				block(n.do, at("do"));
 				break;
 			case "set":

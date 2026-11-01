@@ -26,7 +26,8 @@ src/
   engine.ts   # createEngine → compile → run; scopes, steps, errors
   errors.ts   # CodyScriptError and its codes
   index.ts    # Public surface — keep it small
-  test/       # Test builders (not shipped)
+  test/       # Test builders and shared fixtures (not shipped)
+schema.json   # JSON Schema for hand-writing programs (shipped)
 ```
 
 **Zero runtime dependencies** — keep it that way; the validator is
@@ -38,7 +39,10 @@ in Workers, Node and Bun — no Node built-ins outside tests.
 
 - **Programs are untrusted.** Every new node type needs: its fields in
   `INPUTS`/`INSTRUCTIONS` and a case in `validate.ts`, a case in the engine
-  with a `step()` per evaluation, and tests for its error paths.
+  with a `step()` per evaluation, a definition in `schema.json`, and cases in
+  `src/test/programs.ts` (run against both the validator and the schema).
+- **Programs are compact on purpose.** Keys stay short and literals stay bare;
+  payload size matters to consumers. Prefer a new short key over nesting.
 - **No global state.** Executors belong to an engine.
 - **Variables and lookups use `Map`**, never plain objects keyed by program
   strings.

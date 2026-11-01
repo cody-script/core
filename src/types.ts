@@ -10,29 +10,33 @@ export type Value =
 /** Every node may carry a `tag`: an opaque label echoed back in errors (an editor's node id, a rule name). */
 type Tagged = { tag?: string };
 
-// ── Inputs: nodes that produce a value ──────────────────────────────────────
+// ── Inputs: what produces a value ───────────────────────────────────────────
 
-/** A literal value. `{ "$": "val", "val": 42 }` */
+/** A bare number, string, boolean or `null` is its own value. `42`, `"text"` */
+export type Literal = null | boolean | number | string;
+
+/** Any value, including objects and arrays. `{ "$": "val", "val": { "a": 1 } }` */
 export type Constant = Tagged & { $: "val"; val: Value };
 
 /** Reads a variable. `{ "$": "ref", "ref": "total" }` */
 export type Reference = Tagged & { $: "ref"; ref: string };
 
 /**
- * Calls a host-provided executor. `exe.id` picks the executor, `op.id` names
- * the operation it should perform, `op.map` supplies computed arguments and
- * `exe.arg` a static one.
+ * Calls a host-provided executor. `op` is `"<executor>.<operation>"`, split at
+ * the first dot; `map` supplies computed arguments and `arg` a static one.
+ * `{ "$": "op", "op": "math.add", "map": { "a": 1, "b": 2 } }`
  */
 export type Operation = Tagged & {
 	$: "op";
-	op: { id: string; map?: { [arg: string]: Input } };
-	exe: { id: string; arg?: Value };
+	op: string;
+	map?: { [arg: string]: Input };
+	arg?: Value;
 };
 
 /** A block with its own scope; its value is whatever it `ret`urns (else `null`). */
-export type Method = Tagged & { $: "m()"; id?: string; do: Instruction[] };
+export type Method = Tagged & { $: "m()"; do: Instruction[] };
 
-export type Input = Constant | Reference | Operation | Method;
+export type Input = Literal | Constant | Reference | Operation | Method;
 
 // ── Instructions: nodes that do something ───────────────────────────────────
 
@@ -65,11 +69,11 @@ export type Signal = { readonly aborted: boolean; readonly reason?: unknown };
 
 /** What an executor is called with. */
 export type ExecutorCall = {
-	/** `op.id` from the program. */
+	/** The operation: what follows the executor id in `op`. */
 	op: string;
-	/** `exe.arg` from the program, if any. */
+	/** `arg` from the program, if any. */
 	arg?: Value;
-	/** `op.map`, resolved, if any. */
+	/** `map`, resolved, if any. */
 	input?: { [arg: string]: Value };
 	/** The run's abort signal, if one was given. */
 	signal?: Signal;
