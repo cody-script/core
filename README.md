@@ -222,6 +222,14 @@ bun run check           # biome lint + format
 bun run build           # dist/
 ```
 
-Publishing happens from a GitHub release (`.github/workflows/publish.yml`):
-it runs the same checks CI runs on every push, then publishes the release's
-`package.json` version to GitHub Packages.
+### Releasing
+
+Releases are automatic. To ship one, bump `version` in `package.json` in your
+PR (semver: a format or API break is a minor bump while we're on 0.x, a
+major one after 1.0). When it merges, `.github/workflows/release.yml` runs
+CI, publishes that version to GitHub Packages, and creates the `v<version>`
+tag and GitHub release, with notes listing the merged PRs. A merge that
+leaves the version alone releases nothing.
+
+If a release fails partway, re-run the workflow from the Actions tab; it
+skips whatever already succeeded.

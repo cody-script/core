@@ -1,7 +1,6 @@
 name: ci
+# Pushes to main run CI through release.yml, so it isn't triggered twice here.
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_call:
 jobs:
