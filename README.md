@@ -220,6 +220,7 @@ bun run test:coverage
 bun run type-check
 bun run check           # biome lint + format
 bun run build           # dist/
+bun run size            # gzipped bundle size (CI budget: 3 KB)
 ```
 
 ### Releasing
@@ -230,6 +231,10 @@ major one after 1.0). When it merges, `.github/workflows/release.yml` runs
 CI, publishes that version to GitHub Packages, and creates the `v<version>`
 tag and GitHub release, with notes listing the merged PRs. A merge that
 leaves the version alone releases nothing.
+
+CI checks this on every PR: one that changes shipped files (`src/` outside
+tests, or `schema.json`) fails until it bumps to a version not yet released,
+so a change can't merge and then never ship.
 
 If a release fails partway, re-run the workflow from the Actions tab; it
 skips whatever already succeeded.

@@ -15,6 +15,7 @@ bun run test:coverage   # thresholds: 100% lines/functions/statements
 bun run type-check
 bun run check           # Biome (check:fix to apply)
 bun run build           # tsc → dist/
+bun run size            # gzipped bundle bytes; CI budget is 3072
 ```
 
 ## Structure
@@ -62,7 +63,13 @@ Feature branches and PRs into `main`; never push to `main`. Prefixes:
 `main` runs `.github/workflows/release.yml`: CI, publish to GitHub Packages,
 then tag `v<version>` and create the GitHub release. Bump in any PR that
 changes what ships (`src/`, `schema.json`, `package.json`); leave it alone
-for docs- or test-only PRs. Never create tags or releases by hand — the
-workflow treats an existing tag as "already released".
+for docs- or test-only PRs. CI enforces this: a PR touching shipped files
+(`src/` outside tests, `schema.json`) fails unless it bumps to an unreleased
+version. Never create tags or releases by hand — the workflow treats an
+existing tag as "already released".
+
+**Size budget.** CI fails if the minified bundle passes 3 KB gzipped
+(`SIZE_BUDGET_BYTES` in `ci.yml`). Raise it only deliberately, saying why in
+the PR.
 
 Keep this file accurate. An out-of-date CLAUDE.md is worse than none.
