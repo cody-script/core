@@ -56,7 +56,13 @@ in Workers, Node and Bun — no Node built-ins outside tests.
 ## Git Workflow
 
 Feature branches and PRs into `main`; never push to `main`. Prefixes:
-`feat/`, `fix/`, `refactor/`, `docs/`, `test/`. Releases are cut by
-publishing a GitHub release after bumping `version`.
+`feat/`, `fix/`, `refactor/`, `docs/`, `test/`.
+
+**Releasing is bumping `version` in `package.json` in a PR.** Merging it to
+`main` runs `.github/workflows/release.yml`: CI, publish to GitHub Packages,
+then tag `v<version>` and create the GitHub release. Bump in any PR that
+changes what ships (`src/`, `schema.json`, `package.json`); leave it alone
+for docs- or test-only PRs. Never create tags or releases by hand — the
+workflow treats an existing tag as "already released".
 
 Keep this file accurate. An out-of-date CLAUDE.md is worse than none.
