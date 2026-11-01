@@ -11,6 +11,9 @@ import type {
 } from "./types.js";
 import { escapeKey, validate } from "./validate.js";
 
+// Global in every supported runtime (Workers, Node 17+, Bun) but not in the ES lib.
+declare function structuredClone<T>(value: T): T;
+
 const DEFAULT_MAX_STEPS = 100_000;
 const DEFAULT_MAX_DEPTH = 128;
 
