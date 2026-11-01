@@ -1,0 +1,48 @@
+{
+	"name": "@cody-script/engine",
+	"version": "0.1.0",
+	"description": "CodyScript: a small, sandboxed interpreter for programs written as JSON. Hosts supply the operations; programs supply the logic.",
+	"author": "Cody Pope",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/cody-script/engine.git"
+	},
+	"publishConfig": {
+		"registry": "https://npm.pkg.github.com"
+	},
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"files": ["dist"],
+	"sideEffects": false,
+	"engines": {
+		"node": ">=18"
+	},
+	"scripts": {
+		"build": "rm -rf dist && tsc -p tsconfig.build.json",
+		"type-check": "tsc --noEmit",
+		"test": "vitest --run",
+		"test:watch": "vitest",
+		"test:coverage": "vitest --run --coverage",
+		"check": "biome check .",
+		"check:fix": "biome check --write .",
+		"prepublishOnly": "bun run check && bun run type-check && bun run test && bun run build"
+	},
+	"dependencies": {
+		"valibot": "^1.5.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "1.9.4",
+		"@types/node": "^22.20.5",
+		"@vitest/coverage-v8": "^3.2.7",
+		"typescript": "^5.9.3",
+		"vitest": "^3.2.7"
+	}
+}
