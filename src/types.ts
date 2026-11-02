@@ -10,56 +10,57 @@ export type Value =
 /** Every node may carry a `tag`: an opaque label echoed back in errors (an editor's node id, a rule name). */
 type Tagged = { tag?: string };
 
+// Every node is an object whose type is its key: `{ "ref": "x" }` is a
+// reference, `{ "set": { "x": 1 } }` an assignment. Objects and arrays in an
+// input position are always nodes; a constant object is wrapped in `val`.
+
 // ── Inputs: what produces a value ───────────────────────────────────────────
 
 /** A bare number, string, boolean or `null` is its own value. `42`, `"text"` */
 export type Literal = null | boolean | number | string;
 
-/** Any value, including objects and arrays. `{ "$": "val", "val": { "a": 1 } }` */
-export type Constant = Tagged & { $: "val"; val: Value };
+/** Any value, including objects and arrays. `{ "val": { "a": 1 } }` */
+export type Constant = Tagged & { val: Value };
 
-/** Reads a variable. `{ "$": "ref", "ref": "total" }` */
-export type Reference = Tagged & { $: "ref"; ref: string };
+/** Reads a variable. `{ "ref": "total" }` */
+export type Reference = Tagged & { ref: string };
 
 /**
- * Calls a host-provided executor. `op` is `"<executor>.<operation>"`, split at
- * the first dot; `map` supplies computed arguments and `arg` a static one.
- * `{ "$": "op", "op": "math.add", "map": { "a": 1, "b": 2 } }`
+ * Calls a host-provided executor. `op` has one key, `"<executor>.<operation>"`
+ * (split at the first dot), naming the arguments to compute; `arg` is a static
+ * one. `{ "op": { "math.add": { "a": 1, "b": 2 } } }`
  */
 export type Operation = Tagged & {
-	$: "op";
-	op: string;
-	map?: { [arg: string]: Input };
+	op: { [call: string]: { [arg: string]: Input } };
 	arg?: Value;
 };
 
-/** A block with its own scope; its value is whatever it `ret`urns (else `null`). */
-export type Method = Tagged & { $: "m()"; do: Instruction[] };
+/** A block with its own scope; its value is whatever it `ret`urns (else `null`). `{ "do": [...] }` */
+export type Block = Tagged & { do: Instruction[] };
 
-export type Input = Literal | Constant | Reference | Operation | Method;
+export type Input = Literal | Constant | Reference | Operation | Block;
 
 // ── Instructions: nodes that do something ───────────────────────────────────
 
-/** Assigns a variable in the current scope. */
-export type Set = Tagged & { $: "set"; set: string; to: Input };
+/** Assigns one variable in the current scope. `{ "set": { "total": 0 } }` */
+export type Set = Tagged & { set: { [name: string]: Input } };
 
-/** Ends the enclosing method with a value. */
-export type Return = Tagged & { $: "ret"; ret: Input };
+/** Ends the enclosing block with a value. `{ "ret": { "ref": "total" } }` */
+export type Return = Tagged & { ret: Input };
 
 /** Runs `do` when `if` is truthy, otherwise `el`. */
 export type Condition = Tagged & {
-	$: "if";
 	if: Input;
 	do: Instruction[];
 	el?: Instruction[];
 };
 
-/** Runs `do` while `if` is truthy. */
-export type Loop = Tagged & { $: "for"; if: Input; do: Instruction[] };
+/** Runs `do` while `for` is truthy. */
+export type Loop = Tagged & { for: Input; do: Instruction[] };
 
 export type Instruction = Set | Return | Condition | Loop;
 
-/** A program is any input; usually a method. */
+/** A program is any input; usually a block. */
 export type Program = Input;
 
 // ── Host side ───────────────────────────────────────────────────────────────
@@ -69,12 +70,12 @@ export type Signal = { readonly aborted: boolean; readonly reason?: unknown };
 
 /** What an executor is called with. */
 export type ExecutorCall = {
-	/** The operation: what follows the executor id in `op`. */
+	/** The operation: what follows the executor id in the call. */
 	op: string;
 	/** `arg` from the program, if any. */
 	arg?: Value;
-	/** `map`, resolved, if any. */
-	input?: { [arg: string]: Value };
+	/** The call's arguments, resolved (`{}` when it has none). */
+	input: { [arg: string]: Value };
 	/** The run's abort signal, if one was given. */
 	signal?: Signal;
 };

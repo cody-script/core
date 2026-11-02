@@ -3,14 +3,57 @@ name: ci
 on:
   pull_request:
   workflow_call:
+env:
+  # Gzipped size of the minified bundle; keeps the engine small on purpose.
+  SIZE_BUDGET_BYTES: 3072
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun run type-check
       - run: bun run test:coverage
       - run: bun run build
+      - name: Bundle size budget
+        run: |
+          size=$(bun run --silent size | tr -d ' ')
+          echo "Bundle: $size bytes gzipped (budget $SIZE_BUDGET_BYTES)"
+          if [ "$size" -gt "$SIZE_BUDGET_BYTES" ]; then
+            echo "::error::The bundle is $size bytes gzipped, over the $SIZE_BUDGET_BYTES-byte budget."
+            exit 1
+          fi
+
+  # Releases happen when a merge bumps the version, so a PR that changes what
+  # ships without bumping it would merge and never be released.
+  version-bump:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Require a version bump when shipped files change
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          shipped=$(git diff --name-only "$BASE"...HEAD -- src schema.json \
+            ':(exclude,glob)src/**/*.test.ts' ':(exclude)src/test')
+          if [ -z "$shipped" ]; then
+            echo "No shipped files changed; no version bump needed."
+            exit 0
+          fi
+          base_version=$(git show "$BASE:package.json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          version=$(node -p "require('./package.json').version")
+          echo "Shipped files changed:"; echo "$shipped"
+          if [ "$version" = "$base_version" ]; then
+            echo "::error file=package.json::Shipped files changed but version is still $version. Bump it so merging releases this change."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            echo "::error file=package.json::v$version is already released. Bump to a version that isn't."
+            exit 1
+          fi
+          echo "Merging will release v$version (was $base_version)."

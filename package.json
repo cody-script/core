@@ -1,6 +1,6 @@
 {
 	"name": "@cody-script/engine",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "CodyScript: a small, sandboxed interpreter for programs written as JSON. Hosts supply the operations; programs supply the logic.",
 	"author": "Cody Pope",
 	"license": "MIT",
@@ -28,6 +28,7 @@
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc -p tsconfig.build.json",
+		"size": "bun build src/index.ts --minify | gzip -c | wc -c",
 		"type-check": "tsc --noEmit",
 		"test": "vitest --run",
 		"test:watch": "vitest",

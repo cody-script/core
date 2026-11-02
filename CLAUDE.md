@@ -15,6 +15,7 @@ bun run test:coverage   # thresholds: 100% lines/functions/statements
 bun run type-check
 bun run check           # Biome (check:fix to apply)
 bun run build           # tsc → dist/
+bun run size            # gzipped bundle bytes; CI budget is 3072
 ```
 
 ## Structure
@@ -41,8 +42,12 @@ in Workers, Node and Bun — no Node built-ins outside tests.
   `INPUTS`/`INSTRUCTIONS` and a case in `validate.ts`, a case in the engine
   with a `step()` per evaluation, a definition in `schema.json`, and cases in
   `src/test/programs.ts` (run against both the validator and the schema).
-- **Programs are compact on purpose.** Keys stay short and literals stay bare;
-  payload size matters to consumers. Prefer a new short key over nesting.
+- **Programs are compact on purpose.** A node's type is its key (`{ "ref": "x" }`,
+  no `"$"`), keys stay short and literals stay bare; payload size matters to
+  consumers. Position decides meaning: an object in an input position is
+  always a node (constants go in `val`), and a node has exactly one type key.
+  Free-form names (variables, calls) live in their own one-key objects so
+  they can never collide with `tag` or a type key.
 - **No global state.** Executors belong to an engine.
 - **Variables and lookups use `Map`**, never plain objects keyed by program
   strings.
@@ -62,7 +67,13 @@ Feature branches and PRs into `main`; never push to `main`. Prefixes:
 `main` runs `.github/workflows/release.yml`: CI, publish to GitHub Packages,
 then tag `v<version>` and create the GitHub release. Bump in any PR that
 changes what ships (`src/`, `schema.json`, `package.json`); leave it alone
-for docs- or test-only PRs. Never create tags or releases by hand — the
-workflow treats an existing tag as "already released".
+for docs- or test-only PRs. CI enforces this: a PR touching shipped files
+(`src/` outside tests, `schema.json`) fails unless it bumps to an unreleased
+version. Never create tags or releases by hand — the workflow treats an
+existing tag as "already released".
+
+**Size budget.** CI fails if the minified bundle passes 3 KB gzipped
+(`SIZE_BUDGET_BYTES` in `ci.yml`). Raise it only deliberately, saying why in
+the PR.
 
 Keep this file accurate. An out-of-date CLAUDE.md is worse than none.

@@ -30,7 +30,7 @@ describe("schema.json", () => {
 		);
 		const programs = [...readme.matchAll(/```jsonc?\n([\s\S]*?)```/g)]
 			.map((block) => JSON.parse(block[1]!))
-			.filter((json) => typeof json === "object" && "$" in json);
+			.filter((json) => typeof json === "object" && "do" in json);
 		expect(programs).toHaveLength(2);
 		for (const program of programs)
 			expect(check(program), JSON.stringify(check.errors)).toBe(true);

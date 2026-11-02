@@ -1,11 +1,11 @@
 import { CodyScriptError } from "./errors.js";
 import type {
+	Block,
 	Executor,
 	Input,
 	Instruction,
 	Limits,
 	Literal,
-	Method,
 	Operation,
 	Program,
 	Signal,
@@ -114,6 +114,9 @@ type Frame = { scope: Scope; done: boolean; result: Value };
 const isNode = (input: Input): input is Exclude<Input, Literal> =>
 	typeof input === "object" && input !== null;
 
+/** The one entry of a one-key object (`set`, `op`); validate() guarantees it. */
+const only = <T>(o: { [key: string]: T }): [string, T] => Object.entries(o)[0]!;
+
 /** JS truthiness: `false`, `0`, `""` and `null` are false; everything else, including `[]` and `{}`, is true. */
 const truthy = (value: Value): boolean => Boolean(value);
 
@@ -132,8 +135,8 @@ class Run {
 			scope.set(name, value);
 		// A top-level method runs in the root scope, so its assignments are the result's variables.
 		const value =
-			isNode(program) && program.$ === "m()"
-				? await this.method(program, scope, "")
+			isNode(program) && "do" in program
+				? await this.block(program, scope, "")
 				: await this.resolve(program, scope, "");
 		return { value, variables: scope.toObject(), steps: this.steps };
 	}
@@ -165,25 +168,20 @@ class Run {
 			return input;
 		}
 		this.step(path, input.tag);
-		switch (input.$) {
-			case "val":
-				return input.val;
-			case "ref": {
-				const value = scope.get(input.ref);
-				if (value === undefined) {
-					throw new CodyScriptError(
-						"undefined_variable",
-						`Variable "${input.ref}" is not defined`,
-						{ path, tag: input.tag },
-					);
-				}
-				return value;
+		if ("val" in input) return input.val;
+		if ("ref" in input) {
+			const value = scope.get(input.ref);
+			if (value === undefined) {
+				throw new CodyScriptError(
+					"undefined_variable",
+					`Variable "${input.ref}" is not defined`,
+					{ path, tag: input.tag },
+				);
 			}
-			case "op":
-				return this.operation(input, scope, path);
-			case "m()":
-				return this.method(input, new Scope(scope), path);
+			return value;
 		}
+		if ("op" in input) return this.operation(input, scope, path);
+		return this.block(input, new Scope(scope), path);
 	}
 
 	private async operation(
@@ -191,29 +189,23 @@ class Run {
 		scope: Scope,
 		path: string,
 	): Promise<Value> {
-		const dot = input.op.indexOf(".");
-		const exe = input.op.slice(0, dot);
-		const op = input.op.slice(dot + 1);
+		const [call, map] = only(input.op);
+		const dot = call.indexOf(".");
+		const exe = call.slice(0, dot);
+		const op = call.slice(dot + 1);
 		// Checked by validate(); the Map is the engine's own, so this cannot miss.
 		const executor = this.executors.get(exe)!;
-		let args: Variables | undefined;
-		if (input.map) {
-			args = {};
-			// In order, one at a time: arguments may have side effects.
-			for (const [arg, from] of Object.entries(input.map)) {
-				const value = await this.resolve(
-					from,
-					scope,
-					`${path}/map/${escapeKey(arg)}`,
-				);
-				args[arg] = value;
-			}
+		const args: Variables = {};
+		// In order, one at a time: arguments may have side effects.
+		for (const [arg, from] of Object.entries(map)) {
+			const at = `${path}/op/${escapeKey(call)}/${escapeKey(arg)}`;
+			args[arg] = await this.resolve(from, scope, at);
 		}
 		try {
 			const result = await executor({
 				op,
 				...(input.arg !== undefined && { arg: input.arg }),
-				...(args && { input: args }),
+				input: args,
 				...(this.signal && { signal: this.signal }),
 			});
 			return result === undefined ? null : result;
@@ -228,17 +220,17 @@ class Run {
 		}
 	}
 
-	private async method(
-		method: Method,
+	private async block(
+		block: Block,
 		scope: Scope,
 		path: string,
 	): Promise<Value> {
 		const frame: Frame = { scope, done: false, result: null };
-		await this.block(method.do, frame, `${path}/do`);
+		await this.list(block.do, frame, `${path}/do`);
 		return frame.result;
 	}
 
-	private async block(
+	private async list(
 		list: Instruction[],
 		frame: Frame,
 		path: string,
@@ -254,32 +246,29 @@ class Run {
 		path: string,
 	): Promise<void> {
 		this.step(path, ins.tag);
-		switch (ins.$) {
-			case "set":
-				frame.scope.set(
-					ins.set,
-					await this.resolve(ins.to, frame.scope, `${path}/to`),
-				);
-				return;
-			case "ret":
-				frame.result = await this.resolve(ins.ret, frame.scope, `${path}/ret`);
-				frame.done = true;
-				return;
-			case "if":
-				if (truthy(await this.resolve(ins.if, frame.scope, `${path}/if`))) {
-					await this.block(ins.do, frame, `${path}/do`);
-				} else if (ins.el) {
-					await this.block(ins.el, frame, `${path}/el`);
-				}
-				return;
-			case "for":
-				while (
-					!frame.done &&
-					truthy(await this.resolve(ins.if, frame.scope, `${path}/if`))
-				) {
-					await this.block(ins.do, frame, `${path}/do`);
-				}
-				return;
+		const { scope } = frame;
+		if ("set" in ins) {
+			const [name, to] = only(ins.set);
+			scope.set(
+				name,
+				await this.resolve(to, scope, `${path}/set/${escapeKey(name)}`),
+			);
+		} else if ("ret" in ins) {
+			frame.result = await this.resolve(ins.ret, scope, `${path}/ret`);
+			frame.done = true;
+		} else if ("if" in ins) {
+			if (truthy(await this.resolve(ins.if, scope, `${path}/if`))) {
+				await this.list(ins.do, frame, `${path}/do`);
+			} else if (ins.el) {
+				await this.list(ins.el, frame, `${path}/el`);
+			}
+		} else {
+			while (
+				!frame.done &&
+				truthy(await this.resolve(ins.for, scope, `${path}/for`))
+			) {
+				await this.list(ins.do, frame, `${path}/do`);
+			}
 		}
 	}
 }
