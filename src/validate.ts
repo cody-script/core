@@ -10,18 +10,22 @@ type Issue = {
 };
 type Node = { [key: string]: unknown };
 
-/** Fields each node type may carry besides `$` and `tag`. A Map, so `$` can't name an `Object.prototype` member. */
+/**
+ * Node types by the key that names them, with the other fields each may carry
+ * besides `tag`. A node has exactly one type key; its position (input or
+ * instruction) decides which set applies.
+ */
 const INPUTS = new Map([
-	["val", ["val"]],
-	["ref", ["ref"]],
-	["op", ["op", "map", "arg"]],
-	["m()", ["do"]],
+	["val", []],
+	["ref", []],
+	["op", ["arg"]],
+	["do", []],
 ]);
 const INSTRUCTIONS = new Map([
-	["set", ["set", "to"]],
-	["ret", ["ret"]],
-	["if", ["if", "do", "el"]],
-	["for", ["if", "do"]],
+	["set", []],
+	["ret", []],
+	["if", ["do", "el"]],
+	["for", ["do"]],
 ]);
 
 /** Keys no object may use; refused rather than risk `Object.prototype` reaching a program. */
@@ -129,47 +133,62 @@ export function validate(
 		else value(v, keys);
 	};
 
+	/** A one-key object (`set`, `op`): its single entry, or undefined. */
+	const single = (v: unknown, keys: Keys): [string, unknown] | undefined => {
+		if (!isObject(v)) {
+			fail(keys, "Expected an object");
+			return undefined;
+		}
+		if (!container(v, keys)) return undefined;
+		const entries = Object.entries(v);
+		if (entries.length === 1) return entries[0];
+		fail(keys, `Expected exactly one key, found ${entries.length}`);
+		return undefined;
+	};
+
 	const operation = (n: Node, keys: Keys): void => {
-		const at = [...keys, "op"];
-		const dot = typeof n.op === "string" ? n.op.indexOf(".") : -1;
-		if (dot < 1 || dot === (n.op as string).length - 1) {
-			fail(at, 'Expected "<executor>.<operation>"');
-		} else {
-			const exe = (n.op as string).slice(0, dot);
-			if (!hasExecutor(exe)) {
+		const entry = single(n.op, [...keys, "op"]);
+		if (entry) {
+			const [call, args] = entry;
+			const at = [...keys, "op", call];
+			const dot = call.indexOf(".");
+			if (dot < 1 || dot === call.length - 1) {
+				fail(at, 'Expected "<executor>.<operation>"');
+			} else if (!hasExecutor(call.slice(0, dot))) {
 				const tag = typeof n.tag === "string" ? { tag: n.tag } : {};
-				fail(at, `Unknown executor "${exe}"`, {
+				fail(at, `Unknown executor "${call.slice(0, dot)}"`, {
 					code: "unknown_executor",
 					...tag,
 				});
 			}
-		}
-		if (n.map !== undefined) {
-			const map = record(n.map, [...keys, "map"], Object.keys(n.map as object));
+			const map = record(args, at, Object.keys(isObject(args) ? args : {}));
 			for (const [arg, from] of Object.entries(map ?? {}))
-				input(from, [...keys, "map", arg]);
+				input(from, [...at, arg]);
 		}
 		if (n.arg !== undefined) value(n.arg, [...keys, "arg"]);
 	};
 
 	function node(v: unknown, keys: Keys, kinds: Map<string, string[]>): void {
+		const what = kinds === INPUTS ? "an input" : "an instruction";
 		if (!isObject(v)) {
-			fail(keys, "Expected a node object");
+			fail(keys, `Expected ${what} object`);
 			return;
 		}
-		const fields = typeof v.$ === "string" ? kinds.get(v.$) : undefined;
-		if (!fields) {
-			fail(
-				[...keys, "$"],
-				`Unknown node type ${JSON.stringify(v.$) ?? "undefined"}`,
-			);
+		const types = [...kinds.keys()].filter((k) => Object.hasOwn(v, k));
+		if (types.length !== 1) {
+			const expected = [...kinds.keys()].map((k) => `"${k}"`).join(", ");
+			const found = types.length
+				? `, found ${types.map((k) => `"${k}"`).join(" and ")}`
+				: "";
+			fail(keys, `Expected ${what} with exactly one of ${expected}${found}`);
 			return;
 		}
-		const n = record(v, keys, ["$", "tag", ...fields]);
+		const type = types[0]!;
+		const n = record(v, keys, [type, "tag", ...kinds.get(type)!]);
 		if (!n) return;
 		if (n.tag !== undefined) string(n.tag, [...keys, "tag"]);
 		const at = (field: string) => [...keys, field];
-		switch (n.$) {
+		switch (type) {
 			case "val":
 				value(n.val, at("val"));
 				break;
@@ -179,25 +198,23 @@ export function validate(
 			case "op":
 				operation(n, keys);
 				break;
-			case "m()":
-				block(n.do, at("do"));
+			case "set": {
+				const entry = single(n.set, at("set"));
+				if (entry && name(entry[0], at("set")))
+					input(entry[1], [...keys, "set", entry[0]]);
 				break;
-			case "set":
-				name(n.set, at("set"));
-				input(n.to, at("to"));
-				break;
+			}
 			case "ret":
 				input(n.ret, at("ret"));
 				break;
 			case "if":
-				input(n.if, at("if"));
+			case "for":
+				input(n[type], at(type));
 				block(n.do, at("do"));
 				if (n.el !== undefined) block(n.el, at("el"));
 				break;
-			case "for":
-				input(n.if, at("if"));
+			default: // "do": a block
 				block(n.do, at("do"));
-				break;
 		}
 	}
 

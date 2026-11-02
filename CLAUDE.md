@@ -42,8 +42,12 @@ in Workers, Node and Bun — no Node built-ins outside tests.
   `INPUTS`/`INSTRUCTIONS` and a case in `validate.ts`, a case in the engine
   with a `step()` per evaluation, a definition in `schema.json`, and cases in
   `src/test/programs.ts` (run against both the validator and the schema).
-- **Programs are compact on purpose.** Keys stay short and literals stay bare;
-  payload size matters to consumers. Prefer a new short key over nesting.
+- **Programs are compact on purpose.** A node's type is its key (`{ "ref": "x" }`,
+  no `"$"`), keys stay short and literals stay bare; payload size matters to
+  consumers. Position decides meaning: an object in an input position is
+  always a node (constants go in `val`), and a node has exactly one type key.
+  Free-form names (variables, calls) live in their own one-key objects so
+  they can never collide with `tag` or a type key.
 - **No global state.** Executors belong to an engine.
 - **Variables and lookups use `Map`**, never plain objects keyed by program
   strings.

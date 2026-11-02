@@ -37,9 +37,7 @@ describe("inputs", () => {
 	});
 
 	test("an undefined reference fails rather than yielding undefined", async () => {
-		const error = await failure(
-			engine.run({ $: "ref", ref: "nope", tag: "t1" }),
-		);
+		const error = await failure(engine.run({ ref: "nope", tag: "t1" }));
 		expect(error.code).toBe("undefined_variable");
 		expect(error.tag).toBe("t1");
 		expect(error.message).toBe('Variable "nope" is not defined (tag t1)');
@@ -95,10 +93,10 @@ describe("operations", () => {
 		});
 	});
 
-	test("omit input and arg when the program has none", async () => {
+	test("pass empty input and no arg when the program has none", async () => {
 		const exe = vi.fn<Executor>(() => 1);
 		await createEngine({ executors: { exe } }).run(op("exe", "x"));
-		expect(exe).toHaveBeenCalledWith({ op: "x" });
+		expect(exe).toHaveBeenCalledWith({ op: "x", input: {} });
 	});
 
 	test("undefined from an executor is null", async () => {
@@ -146,10 +144,10 @@ describe("operations", () => {
 			e.run(m(set("x", { ...op("bad", "go"), tag: "n1" }))),
 		);
 		expect(error.code).toBe("executor_failed");
-		expect(error.path).toBe("/do/0/to");
+		expect(error.path).toBe("/do/0/set/x");
 		expect(error.cause).toBe(boom);
 		expect(error.message).toBe(
-			'Executor "bad" failed on "go": boom at /do/0/to (tag n1)',
+			'Executor "bad" failed on "go": boom at /do/0/set/x (tag n1)',
 		);
 	});
 
@@ -259,7 +257,7 @@ describe("compile", () => {
 		);
 		expect((await compiled.run({ variables: { n: 1 } })).value).toBe(2);
 		expect((await compiled.run({ variables: { n: 10 } })).value).toBe(11);
-		expect(compiled.program).toMatchObject({ $: "m()" });
+		expect(compiled.program).toMatchObject({ do: [{}, {}] });
 	});
 
 	test("input variables are copied, not mutated", async () => {
@@ -287,11 +285,11 @@ describe("limits", () => {
 	test("an endless loop hits the step limit", async () => {
 		const e = createEngine({ limits: { maxSteps: 50 } });
 		const error = await failure(
-			e.run(m({ $: "for", if: val(true), do: [], tag: "spin" })),
+			e.run(m({ for: val(true), do: [], tag: "spin" })),
 		);
 		expect(error.code).toBe("step_limit");
-		expect(error.path).toBe("/do/0/if");
-		expect(error.message).toBe("Program exceeded 50 steps at /do/0/if");
+		expect(error.path).toBe("/do/0/for");
+		expect(error.message).toBe("Program exceeded 50 steps at /do/0/for");
 	});
 
 	test("the default limit stops an endless loop too", async () => {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { createEngine } from "./engine.js";
 import { CodyScriptError } from "./errors.js";
-import { m, math, op, ref, ret, set, val, when } from "./test/build.js";
+import { loop, m, math, op, ref, ret, set, val, when } from "./test/build.js";
 import { invalid, valid } from "./test/programs.js";
 import { pointer } from "./validate.js";
 
@@ -33,7 +33,7 @@ describe("validation", () => {
 	test.each([
 		["NaN", Number.NaN, ""],
 		["Infinity", val(Number.POSITIVE_INFINITY), "/val"],
-		["undefined", { $: "val", val: undefined }, "/val"],
+		["undefined", { val: undefined }, "/val"],
 		["a function", val((() => 1) as never), "/val"],
 		["a Date", val(new Date() as never), "/val"],
 		["a class instance", val(new (class {})() as never), "/val"],
@@ -55,7 +55,7 @@ describe("validation", () => {
 	});
 
 	test("reports every issue, not just the first", () => {
-		const error = compileError(m(set("", 1), { $: "ret" } as never));
+		const error = compileError(m(set("", 1), { ret: [1] } as never));
 		expect(error.issues?.map((i) => i.path)).toEqual([
 			"/do/0/set",
 			"/do/1/ret",
@@ -65,16 +65,16 @@ describe("validation", () => {
 	test("refuses an unknown executor wherever it is, with its node's tag", () => {
 		const nope = op("nope", "x");
 		const cases: [unknown, string][] = [
-			[{ ...nope, tag: "n7" }, "/op"],
-			[op("math", "add", { a: nope }), "/map/a/op"],
-			[m(set("x", nope)), "/do/0/to/op"],
-			[m(ret(nope)), "/do/0/ret/op"],
-			[m(when(nope, [])), "/do/0/if/op"],
-			[m(when(1, [set("x", nope)])), "/do/0/do/0/to/op"],
-			[m(when(1, [], [set("x", nope)])), "/do/0/el/0/to/op"],
-			[m({ $: "for", if: nope, do: [] }), "/do/0/if/op"],
-			[m({ $: "for", if: 0, do: [set("x", nope)] }), "/do/0/do/0/to/op"],
-			[m(set("x", m(set("y", nope)))), "/do/0/to/do/0/to/op"],
+			[{ ...nope, tag: "n7" }, "/op/nope.x"],
+			[op("math", "add", { a: nope }), "/op/math.add/a/op/nope.x"],
+			[m(set("x", nope)), "/do/0/set/x/op/nope.x"],
+			[m(ret(nope)), "/do/0/ret/op/nope.x"],
+			[m(when(nope, [])), "/do/0/if/op/nope.x"],
+			[m(when(1, [set("x", nope)])), "/do/0/do/0/set/x/op/nope.x"],
+			[m(when(1, [], [set("x", nope)])), "/do/0/el/0/set/x/op/nope.x"],
+			[m(loop(nope, [])), "/do/0/for/op/nope.x"],
+			[m(loop(0, [set("x", nope)])), "/do/0/do/0/set/x/op/nope.x"],
+			[m(set("x", m(set("y", nope)))), "/do/0/set/x/do/0/set/y/op/nope.x"],
 		];
 		for (const [program, path] of cases) {
 			const error = compileError(program);
@@ -82,7 +82,7 @@ describe("validation", () => {
 			expect(error.path).toBe(path);
 		}
 		expect(compileError(cases[0]![0]).message).toBe(
-			'Unknown executor "nope" at /op (tag n7)',
+			'Unknown executor "nope" at /op/nope.x (tag n7)',
 		);
 	});
 
@@ -90,7 +90,7 @@ describe("validation", () => {
 		const error = compileError(m(set("x", op("nope", "x")), set("", 1)));
 		expect(error.code).toBe("unknown_executor");
 		expect(error.issues?.map((i) => i.path)).toEqual([
-			"/do/0/to/op",
+			"/do/0/set/x/op/nope.x",
 			"/do/1/set",
 		]);
 	});
@@ -134,9 +134,10 @@ describe("validation", () => {
 			.run(ref("constructor"))
 			.catch((e: CodyScriptError) => e);
 		expect((error as CodyScriptError).code).toBe("undefined_variable");
-		const { variables } = await createEngine().run(m(set("__proto__", 1)));
+		const { variables } = await createEngine().run(m(set("toString", 1)));
 		expect(Object.getPrototypeOf(variables)).toBe(Object.prototype);
-		expect(Object.keys(variables)).toEqual(["__proto__"]);
+		expect(Object.keys(variables)).toEqual(["toString"]);
+		expect(variables.toString).toBe(1);
 	});
 
 	test("pointer escapes ~ and /", () => {
