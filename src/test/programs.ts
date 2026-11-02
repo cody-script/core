@@ -12,6 +12,8 @@ export const valid: [string, unknown][] = [
 	["a constant object", val({ a: [1, "x", null] })],
 	["a constant object whose keys look like nodes", val({ ref: "x", op: {} })],
 	["a reference", ref("x")],
+	["an expression", { x: "a * 2 > 1 && !done" }],
+	["a tagged expression", { x: "1", tag: "t" }],
 	["a call with no arguments", op("math", "now")],
 	[
 		"a call with arguments and arg",
@@ -63,6 +65,9 @@ export const invalid: [string, unknown, string][] = [
 	["set that isn't an object", m({ set: "x" } as never), "/do/0/set"],
 	["an empty variable name", m(set("", 1)), "/do/0/set"],
 	["an empty reference", ref(""), "/ref"],
+	["an empty expression", { x: "" }, "/x"],
+	["an expression that isn't a string", { x: 1 }, "/x"],
+	["an expression with an extra field", { x: "a", y: 1 }, "/y"],
 	["op with no call", { op: {} }, "/op"],
 	["op with two calls", { op: { "math.a": {}, "math.b": {} } }, "/op"],
 	["op that isn't an object", { op: "math.add" }, "/op"],

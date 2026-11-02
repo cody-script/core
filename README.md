@@ -76,7 +76,7 @@ error rather than ignored.
 **Where a node sits decides what it is.** In an input position, an object or
 array is always a node — only numbers, strings, booleans and `null` stand for
 themselves — so a constant object is wrapped in `val`, and nothing inside
-`val` is read as a node. An input has exactly one of `ref`, `val`, `op`, `do`;
+`val` is read as a node. An input has exactly one of `ref`, `val`, `x`, `op`, `do`;
 an instruction exactly one of `set`, `ret`, `if`, `for`.
 
 ### Inputs — produce a value
@@ -86,6 +86,7 @@ an instruction exactly one of `set`, `ret`, `if`, `for`.
 | literal | `42`, `"text"`, `true`, `null` | Itself. A bare string is text, **never** a variable. |
 | `val` | `{ "val": <json> }` | Any value; needed only for objects and arrays. |
 | `ref` | `{ "ref": "name" }` | The variable. Undefined → `undefined_variable` error. |
+| `x` | `{ "x": "amount * 0.03" }` | An expression over variables (below). |
 | `op` | `{ "op": { "text.trim": { <arg>: <input>, … } }, "arg"?: <json> }` | Calls an executor (below). |
 | `do` | `{ "do": [<instruction>…] }` | A block: runs in a new scope; its value is what it `ret`urns, else `null`. |
 
@@ -105,16 +106,36 @@ passed as written. Executor ids can't contain a dot; operation names can
 | `if` | `{ "if": <input>, "do": […], "el"?: […] }` | Runs `do` if the test is truthy, else `el`. |
 | `for` | `{ "for": <input>, "do": […] }` | Runs `do` while the test is truthy. |
 
+### Expressions
+
+`{ "x": "…" }` covers the arithmetic and logic every host would otherwise
+implement the same way, in a fraction of the bytes:
+
+| | |
+|---|---|
+| Values | numbers (`2`, `0.03`), text in single quotes (`'paid'`, `'it\'s'`), `true`, `false`, `null`, variable names (`gross_sales`) |
+| Arithmetic | `+ - * /`, unary `-`, parentheses — numbers only |
+| Comparison | `== !=` (numbers, text, booleans, `null`; strict, so `1 == '1'` is false); `< <= > >=` (two numbers or two texts). One per level: `a < b < c` is refused — write `a < b && b < c` |
+| Logic | `&&` and `||` short-circuit and return an operand, as in JavaScript (`discount || 0`); `!` |
+
+Precedence, loosest first: `||`, `&&`, comparisons, `+ -`, `* /`, unary.
+There are no function calls: text, dates and everything else are executors.
+
+Expressions are parsed when the program is compiled, so a syntax error is an
+`invalid_program` at that node's `/x`. Running one never re-parses it, never
+evaluates anything as JavaScript, and counts a step per operator and operand.
+Mixing types (`1 + 'a'`, `'a' < 1`), comparing a list or object, or dividing
+by zero is a `type_error` naming the operator and the expression.
+
 A fuller example — a 3% fee on a CSV `Amount`, capped at 300:
 
 ```jsonc
 { "do": [
   { "set": { "amount": { "op": { "num.parse": { "value": { "ref": "Amount" } } } } } },
-  { "if": { "op": { "cmp.lt": { "a": { "ref": "amount" }, "b": 0 } } },
+  { "if": { "x": "amount < 0" },
     "do": [{ "ret": { "val": { "error": "Amount must be positive" } } }] },
-  { "set": { "fee": { "op": { "math.mul": { "a": { "ref": "amount" }, "b": 0.03 } } } } },
-  { "if": { "op": { "cmp.gt": { "a": { "ref": "fee" }, "b": 300 } } },
-    "do": [{ "set": { "fee": 300 } }] },
+  { "set": { "fee": { "x": "amount * 0.03" } } },
+  { "if": { "x": "fee > 300" }, "do": [{ "set": { "fee": 300 } }] },
   { "ret": { "ref": "fee" } }
 ] }
 ```
@@ -136,7 +157,7 @@ that numbers are finite. A test keeps the two in agreement.
 
 Store programs minified, and compress them if size matters: gzip
 (`CompressionStream("gzip")` in Workers) shrinks the fee example above from
-358 bytes to 179.
+272 bytes to 163.
 
 ### Semantics
 
@@ -149,8 +170,8 @@ Store programs minified, and compress them if size matters: gzip
   top-level block runs in the root scope, so its assignments are returned as
   `variables`.
 - **Order**: a call's arguments are resolved one at a time, in key order.
-- There is no expression syntax: arithmetic, comparison, string handling and
-  so on are executors the host provides.
+- **Expressions** do arithmetic, comparison and logic; text, dates and
+  everything else are executors the host provides.
 
 ## Host API
 
@@ -172,7 +193,7 @@ compiled.run({ variables?, signal? }): Promise<RunResult>
   next step with `aborted`, and executors receive it to stop their own work.
 - **Errors** — every failure is a `CodyScriptError` with a `code`
   (`invalid_program`, `unknown_executor`, `undefined_variable`,
-  `executor_failed`, `step_limit`, `aborted`), a JSON Pointer `path` into the
+  `type_error`, `executor_failed`, `step_limit`, `aborted`), a JSON Pointer `path` into the
   program, the node's `tag`, and for `invalid_program` / `unknown_executor`
   every `issue` found.
 - **Isolation** — `compile` copies the program after validating it, so
@@ -184,9 +205,16 @@ A program can only call the executors it was given, and only the operations
 those executors accept: **an executor is the whole attack surface**, so treat
 its inputs as untrusted. The engine refuses malformed or over-deep programs
 before running them, bounds every run by steps, keeps variables and executor
-lookups off `Object.prototype`, and never evaluates strings as code.
+lookups off `Object.prototype`, and never evaluates strings as code:
+expressions are parsed by a small hand-written parser into a tree the engine
+walks itself.
 
 ## Upgrading
+
+### 0.3 → 0.4 (additive)
+
+Adds the `x` expression node and the `type_error` error code. Every 0.3
+program is still valid and behaves the same.
 
 ### 0.2 → 0.3 (format change)
 

@@ -1,4 +1,5 @@
 import { CodyScriptError } from "./errors.js";
+import { type Ast, parse } from "./expression.js";
 import type { Program } from "./types.js";
 
 type Keys = (string | number)[];
@@ -18,6 +19,7 @@ type Node = { [key: string]: unknown };
 const INPUTS = new Map([
 	["val", []],
 	["ref", []],
+	["x", []],
 	["op", ["arg"]],
 	["do", []],
 ]);
@@ -48,6 +50,8 @@ export function validate(
 	program: unknown,
 	maxDepth: number,
 	hasExecutor: (id: string) => boolean,
+	/** Filled with every expression's parse, keyed by its source. */
+	expressions: Map<string, Ast>,
 ): Program {
 	const issues: Issue[] = [];
 	const fail = (keys: Keys, message: string, extra?: Partial<Issue>) =>
@@ -194,6 +198,15 @@ export function validate(
 				break;
 			case "ref":
 				name(n.ref, at("ref"));
+				break;
+			case "x":
+				if (name(n.x, at("x")) && !expressions.has(n.x)) {
+					try {
+						expressions.set(n.x, parse(n.x, maxDepth));
+					} catch (error) {
+						fail(at("x"), `${(error as Error).message} in "${n.x}"`);
+					}
+				}
 				break;
 			case "op":
 				operation(n, keys);
