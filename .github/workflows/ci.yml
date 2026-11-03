@@ -5,7 +5,7 @@ on:
   workflow_call:
 env:
   # Gzipped size of the minified bundle; keeps the engine small on purpose.
-  SIZE_BUDGET_BYTES: 3072
+  SIZE_BUDGET_BYTES: 4096
 jobs:
   check:
     runs-on: ubuntu-latest

@@ -14,6 +14,7 @@
 				{ "$ref": "#/$defs/literal" },
 				{ "$ref": "#/$defs/val" },
 				{ "$ref": "#/$defs/ref" },
+				{ "$ref": "#/$defs/x" },
 				{ "$ref": "#/$defs/op" },
 				{ "$ref": "#/$defs/block" }
 			]
@@ -65,6 +66,16 @@
 			"additionalProperties": false,
 			"properties": {
 				"ref": { "$ref": "#/$defs/name" },
+				"tag": { "$ref": "#/$defs/tag" }
+			}
+		},
+		"x": {
+			"description": "An expression over variables: numbers, 'text', true, false, null, names, + - * /, parentheses, one comparison (== != < <= > >=), && || and !. Syntax is checked by compile().",
+			"type": "object",
+			"required": ["x"],
+			"additionalProperties": false,
+			"properties": {
+				"x": { "type": "string", "minLength": 1 },
 				"tag": { "$ref": "#/$defs/tag" }
 			}
 		},

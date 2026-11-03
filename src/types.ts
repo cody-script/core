@@ -38,7 +38,19 @@ export type Operation = Tagged & {
 /** A block with its own scope; its value is whatever it `ret`urns (else `null`). `{ "do": [...] }` */
 export type Block = Tagged & { do: Instruction[] };
 
-export type Input = Literal | Constant | Reference | Operation | Block;
+/**
+ * An expression over variables: arithmetic, one comparison, `&&` `||` `!`.
+ * Parsed at compile time. `{ "x": "gross - discounts > 0" }`
+ */
+export type Expression = Tagged & { x: string };
+
+export type Input =
+	| Literal
+	| Constant
+	| Reference
+	| Expression
+	| Operation
+	| Block;
 
 // ── Instructions: nodes that do something ───────────────────────────────────
 

@@ -1,7 +1,9 @@
 import { CodyScriptError } from "./errors.js";
+import { type Ast, evaluate } from "./expression.js";
 import type {
 	Block,
 	Executor,
+	Expression,
 	Input,
 	Instruction,
 	Limits,
@@ -70,14 +72,15 @@ export function createEngine(options: EngineOptions = {}): Engine {
 	const maxDepth = options.limits?.maxDepth ?? DEFAULT_MAX_DEPTH;
 
 	const compile = (raw: unknown): CompiledProgram => {
+		const expressions = new Map<string, Ast>();
 		// Validate, then copy: later changes to `raw` can't reach a validated program.
 		const program = structuredClone(
-			validate(raw, maxDepth, (id) => executors.has(id)),
+			validate(raw, maxDepth, (id) => executors.has(id), expressions),
 		);
 		return {
 			program,
 			run: (runOptions = {}) =>
-				new Run(executors, maxSteps, runOptions.signal).program(
+				new Run(executors, expressions, maxSteps, runOptions.signal).program(
 					program,
 					runOptions.variables ?? {},
 				),
@@ -125,6 +128,7 @@ class Run {
 
 	constructor(
 		private readonly executors: Map<string, Executor>,
+		private readonly expressions: Map<string, Ast>,
 		private readonly maxSteps: number,
 		private readonly signal: Signal | undefined,
 	) {}
@@ -180,8 +184,35 @@ class Run {
 			}
 			return value;
 		}
+		if ("x" in input) return this.expression(input, scope, path);
 		if ("op" in input) return this.operation(input, scope, path);
 		return this.block(input, new Scope(scope), path);
+	}
+
+	private expression(input: Expression, scope: Scope, path: string): Value {
+		const at = `${path}/x`;
+		const { tag } = input;
+		const fail = (
+			code: "undefined_variable" | "type_error",
+			message: string,
+		): never => {
+			throw new CodyScriptError(code, `${message} in "${input.x}"`, {
+				path: at,
+				tag,
+			});
+		};
+		// Parsed by validate() at compile time.
+		return evaluate(this.expressions.get(input.x)!, {
+			// `null` is a value; only a missing variable is undefined.
+			get: (name) => {
+				const value = scope.get(name);
+				return value === undefined
+					? fail("undefined_variable", `Variable "${name}" is not defined`)
+					: value;
+			},
+			step: () => this.step(at, tag),
+			fail: (message) => fail("type_error", message),
+		});
 	}
 
 	private async operation(

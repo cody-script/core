@@ -2,6 +2,7 @@ export type ErrorCode =
 	| "invalid_program"
 	| "unknown_executor"
 	| "undefined_variable"
+	| "type_error"
 	| "executor_failed"
 	| "step_limit"
 	| "aborted";

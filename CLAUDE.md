@@ -15,7 +15,7 @@ bun run test:coverage   # thresholds: 100% lines/functions/statements
 bun run type-check
 bun run check           # Biome (check:fix to apply)
 bun run build           # tsc → dist/
-bun run size            # gzipped bundle bytes; CI budget is 3072
+bun run size            # gzipped bundle bytes; CI budget is 4096
 ```
 
 ## Structure
@@ -23,7 +23,9 @@ bun run size            # gzipped bundle bytes; CI budget is 3072
 ```
 src/
   types.ts    # The language (Value, Input, Instruction) and host types
-  validate.ts # One walk: shape, JSON values, depth, reserved keys, executor ids
+  validate.ts # One walk: shape, JSON values, depth, reserved keys, executor ids,
+              # and parsing every expression (cached for the run)
+  expression.ts # The `x` expression language: hand-written parser + evaluator
   engine.ts   # createEngine → compile → run; scopes, steps, errors
   errors.ts   # CodyScriptError and its codes
   index.ts    # Public surface — keep it small
@@ -48,6 +50,10 @@ in Workers, Node and Bun — no Node built-ins outside tests.
   always a node (constants go in `val`), and a node has exactly one type key.
   Free-form names (variables, calls) live in their own one-key objects so
   they can never collide with `tag` or a type key.
+- **Expressions stay small.** Arithmetic, comparison and logic over
+  variables — no function calls, no assignment, no loops; anything else is an
+  executor. Types are strict (`1 + 'a'` is a `type_error`, never coercion).
+  They're parsed once, in `validate`, and never evaluated as JavaScript.
 - **No global state.** Executors belong to an engine.
 - **Variables and lookups use `Map`**, never plain objects keyed by program
   strings.
@@ -72,8 +78,8 @@ for docs- or test-only PRs. CI enforces this: a PR touching shipped files
 version. Never create tags or releases by hand — the workflow treats an
 existing tag as "already released".
 
-**Size budget.** CI fails if the minified bundle passes 3 KB gzipped
+**Size budget.** CI fails if the minified bundle passes 4 KB gzipped
 (`SIZE_BUDGET_BYTES` in `ci.yml`). Raise it only deliberately, saying why in
-the PR.
+the PR. (It went 3 → 4 KB for expressions, which cost ~1.2 KB.)
 
 Keep this file accurate. An out-of-date CLAUDE.md is worse than none.
