@@ -10,18 +10,14 @@ It is meant for rules that live in data rather than code: a tenant's CSV
 mapping, a validation rule, a pipeline step. It has no runtime dependencies
 and runs unchanged in Workers, Node (18+) and Bun.
 
-It is published privately to GitHub Packages. A consumer needs the scope
-mapped to that registry and a token with `read:packages`:
-
-```ini
-# .npmrc (or bunfig.toml: [install.scopes] "@cody-script" = { url = "https://npm.pkg.github.com", token = "$GITHUB_TOKEN" })
-@cody-script:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
-```
+It's MIT licensed and published on npm:
 
 ```bash
-bun add @cody-script/engine
+npm install @cody-script/engine   # or: bun add / pnpm add / yarn add
 ```
+
+Each release is also published to GitHub Packages, for projects that already
+map the `@cody-script` scope there.
 
 ## Quick start
 
@@ -271,7 +267,7 @@ bun run test:coverage
 bun run type-check
 bun run check           # biome lint + format
 bun run build           # dist/
-bun run size            # gzipped bundle size (CI budget: 3 KB)
+bun run size            # gzipped bundle size (CI budget: 4 KB)
 ```
 
 ### Releasing
@@ -279,9 +275,11 @@ bun run size            # gzipped bundle size (CI budget: 3 KB)
 Releases are automatic. To ship one, bump `version` in `package.json` in your
 PR (semver: a format or API break is a minor bump while we're on 0.x, a
 major one after 1.0). When it merges, `.github/workflows/release.yml` runs
-CI, publishes that version to GitHub Packages, and creates the `v<version>`
-tag and GitHub release, with notes listing the merged PRs. A merge that
-leaves the version alone releases nothing.
+CI, publishes that version to npm (npmjs.org) and to GitHub Packages, and
+creates the `v<version>` tag and GitHub release, with notes listing the
+merged PRs. A merge that leaves the version alone releases nothing.
+Publishing to npm needs the repository secret `NPM_TOKEN`: an npm automation
+token that can publish `@cody-script/engine`.
 
 CI checks this on every PR: one that changes shipped files (`src/` outside
 tests, or `schema.json`) fails until it bumps to a version not yet released,
