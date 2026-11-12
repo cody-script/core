@@ -1,6 +1,6 @@
 {
 	"$schema": "https://json-schema.org/draft/2020-12/schema",
-	"$id": "https://github.com/cody-script/engine/schema.json",
+	"$id": "https://github.com/cody-script/core/schema.json",
 	"title": "CodyScript program",
 	"description": "A program is an input: a literal or an input node, usually a block ({ \"do\": [...] }). Every node is an object whose type is its key. The engine's compile() also checks executor ids, nesting depth and finite numbers.",
 	"$ref": "#/$defs/input",

@@ -59,8 +59,8 @@ jobs:
         run: |
           # setup-node maps the @cody-script scope to GitHub Packages.
           # Skip if a retry finds this version already published.
-          if npm view "@cody-script/engine@$VERSION" version > /dev/null 2>&1; then
-            echo "::notice::@cody-script/engine@$VERSION is already on GitHub Packages."
+          if npm view "@cody-script/core@$VERSION" version > /dev/null 2>&1; then
+            echo "::notice::@cody-script/core@$VERSION is already on GitHub Packages."
           else
             npm publish
           fi
@@ -85,9 +85,9 @@ jobs:
         run: |
           version=$(node -p "require('./package.json').version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if npm view "@cody-script/engine@$version" version --registry https://registry.npmjs.org > /dev/null 2>&1; then
+          if npm view "@cody-script/core@$version" version --registry https://registry.npmjs.org > /dev/null 2>&1; then
             echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::@cody-script/engine@$version is already on npm."
+            echo "::notice::@cody-script/core@$version is already on npm."
           else
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi

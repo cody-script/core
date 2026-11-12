@@ -1,6 +1,6 @@
-# engine — CodyScript
+# @cody-script/core — CodyScript
 
-`@cody-script/engine` is the CodyScript interpreter: a small, sandboxed interpreter for programs written as JSON. The **host**
+`@cody-script/core` is the CodyScript interpreter: a small, sandboxed interpreter for programs written as JSON. The **host**
 decides what a program can do by handing it a set of **executors**; the
 **program** — stored config, written by a person or an editor — supplies the
 logic: variables, conditions, loops and calls to those executors. Nothing else
@@ -13,7 +13,7 @@ and runs unchanged in Workers, Node (18+) and Bun.
 It's MIT licensed and published on npm:
 
 ```bash
-npm install @cody-script/engine   # or: bun add / pnpm add / yarn add
+npm install @cody-script/core   # or: bun add / pnpm add / yarn add
 ```
 
 Each release is also published to GitHub Packages, for projects that already
@@ -38,7 +38,7 @@ A rule that cleans a CSV row's `Name` column and refuses a blank one:
 ```
 
 ```ts
-import { createEngine, type Executor } from "@cody-script/engine";
+import { createEngine, type Executor } from "@cody-script/core";
 
 const text: Executor = ({ op, input }) => {
   const value = String(input?.value ?? "");
@@ -138,12 +138,12 @@ A fuller example — a 3% fee on a CSV `Amount`, capped at 300:
 
 ### Writing programs by hand
 
-[`schema.json`](schema.json) (shipped as `@cody-script/engine/schema.json`) is
+[`schema.json`](schema.json) (shipped as `@cody-script/core/schema.json`) is
 a JSON Schema for the language. Point your editor at it for completion and
 inline errors — in VS Code, `.vscode/settings.json`:
 
 ```jsonc
-{ "json.schemas": [{ "fileMatch": ["*.cody.json"], "url": "./node_modules/@cody-script/engine/schema.json" }] }
+{ "json.schemas": [{ "fileMatch": ["*.cody.json"], "url": "./node_modules/@cody-script/core/schema.json" }] }
 ```
 
 It checks shape only; `compile` also checks executor ids, nesting depth and
@@ -279,7 +279,7 @@ CI, publishes that version to npm (npmjs.org) and to GitHub Packages, and
 creates the `v<version>` tag and GitHub release, with notes listing the
 merged PRs. A merge that leaves the version alone releases nothing.
 Publishing to npm needs the repository secret `NPM_TOKEN`: an npm automation
-token that can publish `@cody-script/engine`.
+token that can publish `@cody-script/core`.
 
 CI checks this on every PR: one that changes shipped files (`src/` outside
 tests, or `schema.json`) fails until it bumps to a version not yet released,

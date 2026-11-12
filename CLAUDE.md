@@ -1,4 +1,4 @@
-# engine
+# core
 
 The **CodyScript interpreter**, as a library: programs are JSON, the host
 supplies executors, and nothing else is reachable. Open source (MIT), on npm

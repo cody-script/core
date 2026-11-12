@@ -1,6 +1,6 @@
 {
-	"name": "@cody-script/engine",
-	"version": "0.4.1",
+	"name": "@cody-script/core",
+	"version": "0.5.0",
 	"description": "CodyScript: a small, sandboxed interpreter for programs written as JSON. Hosts supply the operations; programs supply the logic.",
 	"author": "Cody Pope",
 	"license": "MIT",
@@ -13,13 +13,13 @@
 		"expression",
 		"cloudflare-workers"
 	],
-	"homepage": "https://github.com/cody-script/engine#readme",
+	"homepage": "https://github.com/cody-script/core#readme",
 	"bugs": {
-		"url": "https://github.com/cody-script/engine/issues"
+		"url": "https://github.com/cody-script/core/issues"
 	},
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/cody-script/engine.git"
+		"url": "git+https://github.com/cody-script/core.git"
 	},
 	"type": "module",
 	"exports": {
