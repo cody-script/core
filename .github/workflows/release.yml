@@ -57,9 +57,10 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # setup-node maps the @cody-script scope to GitHub Packages.
           # Skip if a retry finds this version already published.
-          if npm view "@cody-script/engine@$VERSION" version > /dev/null 2>&1; then
-            echo "::notice::@cody-script/engine@$VERSION is already published."
+          if npm view "@cody-script/core@$VERSION" version > /dev/null 2>&1; then
+            echo "::notice::@cody-script/core@$VERSION is already on GitHub Packages."
           else
             npm publish
           fi
@@ -67,3 +68,41 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes
+
+  # npm (npmjs.org), checked against npm itself rather than the git tag, so a
+  # re-run publishes any version npm is missing — e.g. one released before
+  # the NPM_TOKEN secret existed.
+  npm:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - id: read
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if npm view "@cody-script/core@$version" version --registry https://registry.npmjs.org > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::@cody-script/core@$version is already on npm."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.read.outputs.published == 'false'
+        run: bun install --frozen-lockfile && bun run build
+      - name: Publish to npm
+        if: steps.read.outputs.published == 'false'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::Add an npm automation token as the NPM_TOKEN repository secret, then re-run this workflow to publish v$VERSION to npm."
+            exit 1
+          fi
+          # Its own config, so the scope goes to npmjs.org, not GitHub Packages.
+          printf '@cody-script:registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$RUNNER_TEMP/npmjs.npmrc"
+          npm publish --userconfig "$RUNNER_TEMP/npmjs.npmrc" --access public

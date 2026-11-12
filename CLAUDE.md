@@ -1,8 +1,9 @@
-# engine
+# core
 
 The **CodyScript interpreter**, as a library: programs are JSON, the host
-supplies executors, and nothing else is reachable. Consumed by product
-workers (first: `cody-script/etl`) that store tenant-written rules.
+supplies executors, and nothing else is reachable. Open source (MIT), on npm
+and GitHub Packages; CodyScript's product workers use it for tenant-written
+rules.
 README.md is the language reference and host API; this file is the working
 guide.
 
@@ -70,8 +71,9 @@ Feature branches and PRs into `main`; never push to `main`. Prefixes:
 `feat/`, `fix/`, `refactor/`, `docs/`, `test/`.
 
 **Releasing is bumping `version` in `package.json` in a PR.** Merging it to
-`main` runs `.github/workflows/release.yml`: CI, publish to GitHub Packages,
-then tag `v<version>` and create the GitHub release. Bump in any PR that
+`main` runs `.github/workflows/release.yml`: CI, publish to npm (needs the
+`NPM_TOKEN` secret) and to GitHub Packages, then tag `v<version>` and create
+the GitHub release. Bump in any PR that
 changes what ships (`src/`, `schema.json`, `package.json`); leave it alone
 for docs- or test-only PRs. CI enforces this: a PR touching shipped files
 (`src/` outside tests, `schema.json`) fails unless it bumps to an unreleased
