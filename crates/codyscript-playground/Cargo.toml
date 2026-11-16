@@ -1,0 +1,19 @@
+[package]
+name = "codyscript-playground"
+description = "A one-page browser playground for smoke-testing CodyScript compiled to WebAssembly."
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# A native web server. It builds `codyscript-wasm` for the browser itself, by
+# running cargo, so it doesn't depend on that crate — and none of this is
+# ever a dependency of it.
+[dependencies]
+codyscript-core.workspace = true
+codyscript-json.workspace = true
+serde.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["rt", "net", "signal"] }
+# What the `wasm-bindgen` CLI runs, as a library: generates the glue in memory.
+wasm-bindgen-cli-support.workspace = true

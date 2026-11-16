@@ -1,0 +1,5 @@
+# `cargo test`/`cargo bench --target wasm32-unknown-unknown` run the module
+# in Node (or a browser, with WASM_BINDGEN_USE_BROWSER=1) through
+# wasm-bindgen-test-runner: `cargo install wasm-bindgen-cli --version 0.2.130`.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

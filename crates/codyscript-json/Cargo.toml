@@ -1,0 +1,22 @@
+[package]
+name = "codyscript-json"
+description = "JSON for CodyScript: parse and print programs and values, the language's JSON Schema, and serde_json interop."
+keywords = ["interpreter", "sandbox", "json", "rules", "dsl"]
+categories = ["parser-implementations", "config", "encoding"]
+readme = "README.md"
+include = ["src/**/*.rs", "schema.json", "README.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+codyscript-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+jsonschema = { version = "0.60", default-features = false }

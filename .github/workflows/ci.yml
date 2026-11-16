@@ -4,27 +4,71 @@ on:
   pull_request:
   workflow_call:
 env:
-  # Gzipped size of the minified bundle; keeps the engine small on purpose.
-  SIZE_BUDGET_BYTES: 4096
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Must equal the workspace's pinned wasm-bindgen (Cargo.toml).
+  WASM_BINDGEN_VERSION: 0.2.130
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run check
-      - run: bun run type-check
-      - run: bun run test:coverage
-      - run: bun run build
-      - name: Bundle size budget
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      # Dependencies point inward: the core's only runtime dependency is serde.
+      - name: The core depends on serde only
         run: |
-          size=$(bun run --silent size | tr -d ' ')
-          echo "Bundle: $size bytes gzipped (budget $SIZE_BUDGET_BYTES)"
-          if [ "$size" -gt "$SIZE_BUDGET_BYTES" ]; then
-            echo "::error::The bundle is $size bytes gzipped, over the $SIZE_BUDGET_BYTES-byte budget."
+          deps=$(cargo tree -p codyscript-core -e normal --depth 1 --prefix none \
+            | grep -v '^codyscript-core ' | cut -d' ' -f1 | sort -u)
+          echo "codyscript-core depends on: $deps"
+          if [ "$deps" != "serde" ]; then
+            echo "::error file=crates/codyscript-core/Cargo.toml::codyscript-core may depend on serde only; it depends on: $(echo $deps)"
             exit 1
           fi
+
+  # The library crates build on their MSRV, from a lockfile resolved to
+  # versions that support it. (Only check: the dev-dependencies need newer.)
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.77
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +stable generate-lockfile
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+      - run: cargo +1.77 check -p codyscript-core -p codyscript-json
+
+  # Single-threaded WebAssembly, in Node: the bindings, and the deepest
+  # default-limit programs on WebAssembly's 1 MiB stack.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ env.WASM_BINDGEN_VERSION }}
+      - run: cargo test -p codyscript-wasm --target wasm32-unknown-unknown
+      - run: cargo bench -p codyscript-bench --target wasm32-unknown-unknown --bench wasm --no-run
+      # The npm package release.yml publishes, loaded as a Node user would.
+      - run: crates/codyscript-wasm/npm/build.sh
+      - run: node crates/codyscript-wasm/npm/smoke.mjs target/npm
 
   # Releases happen when a merge bumps the version, so a PR that changes what
   # ships without bumping it would merge and never be released.
@@ -39,21 +83,23 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          shipped=$(git diff --name-only "$BASE"...HEAD -- src schema.json \
-            ':(exclude,glob)src/**/*.test.ts' ':(exclude)src/test')
+          # The published crates and npm package (less their tests), and the
+          # workspace manifest they inherit from. They share one version.
+          shipped=$(git diff --name-only "$BASE"...HEAD -- Cargo.toml \
+            crates/codyscript-core ':(exclude)crates/codyscript-core/tests' \
+            crates/codyscript-json ':(exclude)crates/codyscript-json/tests' \
+            crates/codyscript-wasm ':(exclude)crates/codyscript-wasm/tests')
           if [ -z "$shipped" ]; then
             echo "No shipped files changed; no version bump needed."
             exit 0
           fi
-          base_version=$(git show "$BASE:package.json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
-          version=$(node -p "require('./package.json').version")
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "codyscript-core") | .version')
           echo "Shipped files changed:"; echo "$shipped"
-          if [ "$version" = "$base_version" ]; then
-            echo "::error file=package.json::Shipped files changed but version is still $version. Bump it so merging releases this change."
+          status=$(curl -s -o /dev/null -w '%{http_code}' -A "${{ github.repository }} CI" \
+            "https://crates.io/api/v1/crates/codyscript-core/$version")
+          if [ "$status" = 200 ]; then
+            echo "::error file=Cargo.toml::Shipped files changed but $version is already on crates.io. Bump [workspace.package] version so merging releases this change."
             exit 1
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
-            echo "::error file=package.json::v$version is already released. Bump to a version that isn't."
-            exit 1
-          fi
-          echo "Merging will release v$version (was $base_version)."
+          echo "Merging will release $version."

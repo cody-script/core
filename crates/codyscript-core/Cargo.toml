@@ -1,0 +1,25 @@
+[package]
+name = "codyscript-core"
+description = "CodyScript: a small, sandboxed interpreter for programs written as data. Hosts supply the operations; programs supply the logic. Format-independent core."
+keywords = ["interpreter", "sandbox", "rules", "dsl", "serde"]
+categories = ["parser-implementations", "config"]
+readme = "README.md"
+include = ["src/**/*.rs", "README.md", "LICENSE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The only dependency: the data model implements serde's traits, so any
+# serde data format can read and write programs and values.
+serde.workspace = true
+
+[dev-dependencies]
+# Format-neutral checks of the serde impls, and a non-JSON format end to end.
+serde_test = "1"
+serde.workspace = true
+ciborium = "0.2"

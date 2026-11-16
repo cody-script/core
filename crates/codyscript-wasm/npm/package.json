@@ -1,0 +1,32 @@
+{
+	"name": "@cody-script/core-wasm",
+	"version": "0.0.0",
+	"description": "CodyScript compiled to WebAssembly: run programs written as JSON from JavaScript, with executors written in JavaScript.",
+	"author": "Cody Pope",
+	"license": "MIT",
+	"keywords": ["interpreter", "sandbox", "json", "rules", "dsl", "webassembly", "wasm"],
+	"homepage": "https://github.com/cody-script/core/tree/main/crates/codyscript-wasm#readme",
+	"bugs": {
+		"url": "https://github.com/cody-script/core/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/cody-script/core.git",
+		"directory": "crates/codyscript-wasm"
+	},
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./codyscript_wasm.d.ts",
+			"default": "./codyscript_wasm.js"
+		},
+		"./codyscript_wasm_bg.wasm": "./codyscript_wasm_bg.wasm"
+	},
+	"main": "./codyscript_wasm.js",
+	"types": "./codyscript_wasm.d.ts",
+	"files": ["codyscript_wasm.js", "codyscript_wasm.d.ts", "codyscript_wasm_bg.wasm", "codyscript_wasm_bg.wasm.d.ts"],
+	"sideEffects": false,
+	"publishConfig": {
+		"registry": "https://npm.pkg.github.com"
+	}
+}

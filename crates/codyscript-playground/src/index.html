@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CodyScript playground</title>
+<style>
+  body { margin: 0; padding: 1rem 1.5rem; font: 14px/1.4 system-ui, sans-serif; display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.5rem; }
+  header { grid-column: 1 / -1; }
+  h1 { font-size: 1.1rem; margin: 0 0 .75rem; } h1 small { font-weight: normal; color: #666; }
+  label { display: block; margin: .6rem 0 .2rem; font-size: .8rem; font-weight: 600; color: #555; }
+  textarea, pre { box-sizing: border-box; width: 100%; font: 12px/1.4 ui-monospace, monospace; border: 1px solid #ccc; border-radius: 4px; padding: .4rem; margin: 0; }
+  textarea { resize: vertical; } #program { height: 20rem; } #variables, #limits { height: 2.4rem; }
+  pre { background: #fafafa; white-space: pre-wrap; word-break: break-all; max-height: 16rem; overflow: auto; }
+  button, select { font: inherit; margin-top: .6rem; }
+  .pass { color: #137333; } .fail { color: #b3261e; }
+  table { border-collapse: collapse; width: 100%; } td { padding: .15rem .4rem; border-top: 1px solid #eee; }
+</style>
+</head>
+<body>
+<header><h1>CodyScript playground <small id="status">loading…</small></h1></header>
+<section>
+  <select id="case"></select>
+  <label for="program">Program</label><textarea id="program" spellcheck="false"></textarea>
+  <label for="variables">Variables</label><textarea id="variables" spellcheck="false"></textarea>
+  <label for="limits">Limits</label><textarea id="limits" spellcheck="false"></textarea>
+  <button id="run" disabled>Run</button> <button id="all" disabled>Run all</button> <span id="verdict"></span>
+</section>
+<section>
+  <label>Outcome</label><pre id="outcome"></pre>
+  <label>Expected (the outcome must contain this)</label><pre id="expect"></pre>
+  <label>Checklist</label><table id="results"></table>
+</section>
+<script type="module">
+import init, { run, version } from "/pkg/codyscript_wasm.js";
+
+const $ = (id) => document.getElementById(id);
+
+// The demo executors programs can call; see cases.rs. A fresh set per run,
+// so `order` starts again.
+function executors() {
+  let order = 0;
+  return {
+    text: ({ op, input }) => (op === "trim" ? String(input.value ?? "").trim() : String(input.value ?? "") === ""),
+    slow: async ({ arg }) => { await new Promise((done) => setTimeout(done, arg.ms)); return { id: arg.id, order: ++order }; },
+    pair: ({ input }) => input,
+    fail: ({ op, arg }) => { if (op === "reject") return Promise.reject(arg); throw new Error(arg); },
+  };
+}
+
+const execute = async (c) => JSON.parse(await run(c.program, c.variables, executors(), c.limits));
+
+// Does `actual` contain everything in `expected`?
+const contains = (actual, expected) =>
+  expected && typeof expected === "object" && !Array.isArray(expected)
+    ? Object.entries(expected).every(([key, value]) => contains(actual?.[key], value))
+    : JSON.stringify(actual) === JSON.stringify(expected);
+
+const cases = await (await fetch("/cases.json")).json();
+await init({ module_or_path: "/pkg/codyscript_wasm_bg.wasm" });
+$("status").textContent = `codyscript-wasm ${version()}, ${cases.length} cases`;
+
+function select(index) {
+  const c = cases[index];
+  for (const field of ["program", "variables", "limits"]) $(field).value = c[field];
+  $("expect").textContent = JSON.stringify(c.expect, null, 2);
+  $("outcome").textContent = $("verdict").textContent = "";
+}
+
+$("run").onclick = async () => {
+  const c = cases[$("case").value];
+  const edited = { program: $("program").value, variables: $("variables").value, limits: $("limits").value };
+  const outcome = await execute(edited);
+  const pass = contains(outcome, c.expect);
+  $("outcome").textContent = JSON.stringify(outcome, null, 2);
+  $("verdict").textContent = pass ? "✓ as expected" : "✗ not as expected";
+  $("verdict").className = pass ? "pass" : "fail";
+};
+
+$("all").onclick = async () => {
+  $("results").innerHTML = "";
+  let failed = 0;
+  for (const c of cases) {
+    const outcome = await execute(c);
+    const pass = contains(outcome, c.expect);
+    failed += pass ? 0 : 1;
+    const row = $("results").insertRow();
+    row.insertCell().textContent = pass ? "✓" : "✗";
+    row.insertCell().textContent = pass ? c.name : `${c.name}: got ${JSON.stringify(outcome).slice(0, 300)}`;
+    row.className = pass ? "pass" : "fail";
+  }
+  $("verdict").textContent = failed ? `✗ ${failed} of ${cases.length} failed` : `✓ all ${cases.length} passed`;
+  $("verdict").className = failed ? "fail" : "pass";
+  document.body.dataset.result = failed ? "fail" : "pass"; // for headless browsers
+};
+
+cases.forEach((c, i) => $("case").add(new Option(c.name, i)));
+$("case").onchange = () => select($("case").value);
+select(0);
+$("run").disabled = $("all").disabled = false;
+if (location.hash === "#all") $("all").click();
+</script>
+</body>
+</html>
