@@ -1,0 +1,43 @@
+[package]
+name = "codyscript-bench"
+description = "Benchmarks for CodyScript: speed and memory, natively (with and without Tokio) and in single-threaded WebAssembly."
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The scenarios every benchmark shares, so native and WebAssembly numbers
+# measure exactly the same work.
+[dependencies]
+codyscript-core.workspace = true
+codyscript-json.workspace = true
+
+# Native benchmarks: `cargo bench -p codyscript-bench`.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support", "rayon", "async_tokio"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+
+# WebAssembly benchmarks: `cargo bench -p codyscript-bench --target
+# wasm32-unknown-unknown --bench wasm` (in Node, by wasm-bindgen-test-runner).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+codyscript-wasm.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4.80"
+wasm-bindgen-test = "0.3.80"
+js-sys = "0.3.107"
+
+[[bench]]
+name = "speed"
+harness = false
+
+[[bench]]
+name = "tokio"
+harness = false
+
+[[bench]]
+name = "memory"
+harness = false
+
+# Uses wasm-bindgen-test's harness; natively it's empty.
+[[bench]]
+name = "wasm"

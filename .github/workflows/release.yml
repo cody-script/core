@@ -1,9 +1,11 @@
 name: release
-# A merge to main releases when it changes the version in package.json:
-# CI, then publish to GitHub Packages, then tag v<version> with a GitHub
-# release whose notes list the merged PRs. A merge that leaves the version
-# alone (docs, tests) releases nothing. Re-run from the Actions tab
-# (workflow_dispatch) to retry a release that failed partway.
+# A merge to main releases when it changes the workspace version in
+# Cargo.toml: CI, then publish codyscript-core and codyscript-json to
+# crates.io, then tag v<version> with a GitHub release whose notes list the
+# merged PRs; alongside, publish the WebAssembly build to GitHub Packages as
+# the npm package @cody-script/core-wasm. A merge that leaves the version
+# alone (docs, tests) releases nothing. Each step checks what's already done, so re-running from the
+# Actions tab (workflow_dispatch) retries a release that failed partway.
 on:
   push:
     branches: [main]
@@ -11,98 +13,86 @@ on:
 concurrency:
   group: release
   cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: always
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
-  version:
-    needs: ci
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.read.outputs.version }}
-      released: ${{ steps.read.outputs.released }}
-    steps:
-      - uses: actions/checkout@v5
-      - id: read
-        run: |
-          version=$(node -p "require('./package.json').version")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
-            echo "released=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::v$version is already released; bump version in package.json to release."
-          else
-            echo "released=false" >> "$GITHUB_OUTPUT"
-          fi
-
   release:
-    needs: version
-    if: needs.version.outputs.released == 'false'
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - id: read
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "codyscript-core") | .version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # In dependency order: codyscript-json depends on codyscript-core.
+      - name: Publish to crates.io
+        env:
+          VERSION: ${{ steps.read.outputs.version }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          for crate in codyscript-core codyscript-json; do
+            status=$(curl -s -o /dev/null -w '%{http_code}' -A "${{ github.repository }} release" \
+              "https://crates.io/api/v1/crates/$crate/$VERSION")
+            if [ "$status" = 200 ]; then
+              echo "::notice::$crate $VERSION is already on crates.io."
+              continue
+            fi
+            if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+              echo "::error::Add a crates.io API token as the CARGO_REGISTRY_TOKEN repository secret, then re-run this workflow to publish $VERSION."
+              exit 1
+            fi
+            cargo publish -p "$crate"
+          done
+      - name: Tag and create the GitHub release
+        env:
+          VERSION: ${{ steps.read.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
+            echo "::notice::v$VERSION is already tagged."
+          else
+            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes
+          fi
+
+  # @cody-script/core-wasm on GitHub Packages, checked against the registry
+  # itself, so a re-run publishes any version it's missing.
+  npm:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: actions/setup-node@v5
         with:
           node-version: 22
           registry-url: "https://npm.pkg.github.com"
           scope: "@cody-script"
-      - run: bun install --frozen-lockfile
-      - run: bun run build
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.130 # = the workspace's pinned wasm-bindgen
+      - run: crates/codyscript-wasm/npm/build.sh
+      - run: node crates/codyscript-wasm/npm/smoke.mjs target/npm
       - name: Publish to GitHub Packages
+        working-directory: target/npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # setup-node maps the @cody-script scope to GitHub Packages.
-          # Skip if a retry finds this version already published.
-          if npm view "@cody-script/core@$VERSION" version > /dev/null 2>&1; then
-            echo "::notice::@cody-script/core@$VERSION is already on GitHub Packages."
+          version=$(node -p "require('./package.json').version")
+          if npm view "@cody-script/core-wasm@$version" version > /dev/null 2>&1; then
+            echo "::notice::@cody-script/core-wasm@$version is already on GitHub Packages."
           else
             npm publish
           fi
-      - name: Tag and create the GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes
-
-  # npm (npmjs.org), checked against npm itself rather than the git tag, so a
-  # re-run publishes any version npm is missing — e.g. one released before
-  # the NPM_TOKEN secret existed.
-  npm:
-    needs: ci
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-      - id: read
-        run: |
-          version=$(node -p "require('./package.json').version")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if npm view "@cody-script/core@$version" version --registry https://registry.npmjs.org > /dev/null 2>&1; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::@cody-script/core@$version is already on npm."
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-      - if: steps.read.outputs.published == 'false'
-        run: bun install --frozen-lockfile && bun run build
-      - name: Publish to npm
-        if: steps.read.outputs.published == 'false'
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ steps.read.outputs.version }}
-        run: |
-          if [ -z "$NPM_TOKEN" ]; then
-            echo "::error::Add an npm automation token as the NPM_TOKEN repository secret, then re-run this workflow to publish v$VERSION to npm."
-            exit 1
-          fi
-          # Its own config, so the scope goes to npmjs.org, not GitHub Packages.
-          printf '@cody-script:registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$RUNNER_TEMP/npmjs.npmrc"
-          npm publish --userconfig "$RUNNER_TEMP/npmjs.npmrc" --access public
