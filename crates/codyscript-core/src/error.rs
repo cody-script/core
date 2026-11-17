@@ -22,19 +22,23 @@ pub type Cause = Arc<dyn StdError + Send + Sync + 'static>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    /// The program isn't a well-formed CodyScript program.
+    /// The program isn't a well-formed CodyScript program (which includes
+    /// calling a function it neither defines nor declares).
     InvalidProgram,
-    /// The program calls an executor the engine wasn't given.
-    UnknownExecutor,
+    /// The program declares an external function (`ext`) the engine's
+    /// executors don't provide.
+    UnknownFunction,
     /// A `ref` or an expression read a variable that isn't defined.
     UndefinedVariable,
     /// An expression mixed types (`1 + 'a'`), compared a list or object, or
     /// divided by zero.
     TypeError,
-    /// An executor returned an error.
-    ExecutorFailed,
+    /// An external function's executor returned an error.
+    FunctionFailed,
     /// The run used more than `max_steps` steps.
     StepLimit,
+    /// Function calls nested more than `max_depth` deep.
+    DepthLimit,
     /// The run's [`Signal`](crate::Signal) was aborted.
     Aborted,
 }
@@ -44,11 +48,12 @@ impl ErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             ErrorCode::InvalidProgram => "invalid_program",
-            ErrorCode::UnknownExecutor => "unknown_executor",
+            ErrorCode::UnknownFunction => "unknown_function",
             ErrorCode::UndefinedVariable => "undefined_variable",
             ErrorCode::TypeError => "type_error",
-            ErrorCode::ExecutorFailed => "executor_failed",
+            ErrorCode::FunctionFailed => "function_failed",
             ErrorCode::StepLimit => "step_limit",
+            ErrorCode::DepthLimit => "depth_limit",
             ErrorCode::Aborted => "aborted",
         }
     }
@@ -76,7 +81,7 @@ pub struct Details {
     pub path: Option<String>,
     /// The node's `tag`.
     pub tag: Option<String>,
-    /// Every problem found, for `invalid_program` / `unknown_executor`.
+    /// Every problem found, for `invalid_program` / `unknown_function`.
     pub issues: Option<Vec<Issue>>,
     /// What caused this error, reported as its [`source`](StdError::source).
     pub cause: Option<Cause>,
@@ -112,7 +117,7 @@ pub struct Error {
 impl Error {
     /// An error with no path, tag, issues or cause. Executors may return one
     /// (boxed) to fail a run with exactly this error instead of
-    /// `executor_failed`.
+    /// `function_failed`.
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self::with_details(code, message, Details::default())
     }
@@ -160,13 +165,13 @@ impl Error {
         self.tag.as_deref()
     }
 
-    /// For `invalid_program` / `unknown_executor`: every problem found, not
+    /// For `invalid_program` / `unknown_function`: every problem found, not
     /// just the first.
     pub fn issues(&self) -> Option<&[Issue]> {
         self.issues.as_deref()
     }
 
-    /// What caused this error: an executor's error for `executor_failed`, the
+    /// What caused this error: an executor's error for `function_failed`, the
     /// signal's reason for `aborted`.
     pub fn cause(&self) -> Option<&Cause> {
         self.cause.as_ref()

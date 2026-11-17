@@ -12,9 +12,9 @@ It compiles `codyscript-wasm` to WebAssembly, generates the JavaScript glue
 (with `wasm-bindgen-cli-support`, so no CLI to install), and serves the page
 and the module from memory on 127.0.0.1. In the browser:
 
-1. The title should read `codyscript-wasm 0.5.0, 20 cases`.
+1. The title should read `codyscript-wasm 0.6.0, 24 cases`.
 2. Click **Run all**: every case in the checklist should get a green ✓,
-   ending in "✓ all 20 passed". (<http://127.0.0.1:8080/#all> runs them on
+   ending in "✓ all 24 passed". (<http://127.0.0.1:8080/#all> runs them on
    load.)
 3. Pick any case to see its program, variables, limits and expected
    outcome; edit them and **Run** to try your own.

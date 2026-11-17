@@ -56,9 +56,11 @@ errors — in VS Code, `.vscode/settings.json`:
 { "json.schemas": [{ "fileMatch": ["*.cody.json"], "url": "./schema.json" }] }
 ```
 
-It checks shape only; `compile` also checks executor ids, nesting depth,
-expression syntax and that numbers are finite. A test keeps the two in
-agreement.
+It checks shape only — including that `fn` and `ext` appear only at the
+root; `compile` also checks what each `call` names, that no name is both in
+`fn` and in `ext`, that only external calls take `arg`, that the host
+provides every `ext` function, nesting depth, expression syntax and that
+numbers are finite. A test keeps the two in agreement.
 
 ## Storing programs
 

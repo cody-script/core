@@ -23,10 +23,12 @@ fn grew(bytes: usize) {
     PEAK.fetch_max(live, Relaxed);
 }
 
-// SAFETY: every call is forwarded to `System` unchanged; this only counts.
+// SAFETY: every call is forwarded to `System` unchanged, with the arguments
+// and contract our caller gave us; this only counts. (Each `unsafe` block
+// below is that forwarding, and nothing else.)
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = System.alloc(layout);
+        let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
             grew(layout.size());
         }
@@ -34,7 +36,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let ptr = System.alloc_zeroed(layout);
+        let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() {
             grew(layout.size());
         }
@@ -42,12 +44,12 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout);
+        unsafe { System.dealloc(ptr, layout) };
         LIVE.fetch_sub(layout.size(), Relaxed);
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let new = System.realloc(ptr, layout, new_size);
+        let new = unsafe { System.realloc(ptr, layout, new_size) };
         if !new.is_null() {
             // Counted as freeing the old block and allocating the new one.
             LIVE.fetch_sub(layout.size(), Relaxed);

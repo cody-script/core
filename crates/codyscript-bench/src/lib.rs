@@ -11,17 +11,17 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use codyscript_core::{
-    value, CompiledProgram, Engine, ExecutorCall, ExecutorResult, RunOptions, Value, Variables,
+    CompiledProgram, Engine, ExecutorCall, ExecutorResult, RunOptions, Value, Variables, value,
 };
 
 // ── Programs ────────────────────────────────────────────────────────────────
 
-/// The README's rule: trims and checks a `Name` with the `text` executor.
-/// Two executor calls, 8 steps.
+/// The README's rule: trims and checks a `Name` with the `text` executor's
+/// functions. Two external calls, 8 steps.
 pub fn readme_rule() -> Value {
-    value!({ "do": [
-        { "set": { "name": { "op": { "text.trim": { "value": { "ref": "Name" } } } } } },
-        { "if": { "op": { "text.empty": { "value": { "ref": "name" } } } },
+    value!({ "ext": { "text": ["trim", "empty"] }, "do": [
+        { "set": { "name": { "call": { "text.trim": { "value": { "ref": "Name" } } } } } },
+        { "if": { "call": { "text.empty": { "value": { "ref": "name" } } } },
           "do": [{ "ret": { "val": { "error": "Name is required" } } }], "tag": "name-required" },
         { "ret": { "ref": "name" } }
     ] })
@@ -60,16 +60,31 @@ pub fn sum_loop_steps(n: u64) -> u64 {
     11 + 14 * n
 }
 
-/// Counts to `n` by calling the `math.add` executor `n` times: the cost of
-/// an executor call.
+/// Counts to `n` by calling the external function `math.add` `n` times:
+/// the cost of an executor call.
 pub fn call_loop() -> Value {
-    value!({ "do": [
+    value!({ "ext": { "math": ["add"] }, "do": [
         { "set": { "i": 0 } },
         { "for": { "x": "i < n" }, "do": [
-            { "set": { "i": { "op": { "math.add": { "a": { "ref": "i" }, "b": 1 } } } } }
+            { "set": { "i": { "call": { "math.add": { "a": { "ref": "i" }, "b": 1 } } } } }
         ] },
         { "ret": { "ref": "i" } }
     ] })
+}
+
+/// Counts to `n` by calling the CodyScript function `next` `n` times: the
+/// cost of a call of a program's own function (a fresh scope each time).
+pub fn function_loop() -> Value {
+    value!({
+        "fn": { "next": { "x": "i + 1" } },
+        "do": [
+            { "set": { "i": 0 } },
+            { "for": { "x": "i < n" }, "do": [
+                { "set": { "i": { "call": { "next": { "i": { "ref": "i" } } } } } }
+            ] },
+            { "ret": { "ref": "i" } }
+        ]
+    })
 }
 
 /// `width` independent instructions, each with its own expression: compile
@@ -160,8 +175,8 @@ pub fn math(call: ExecutorCall) -> ExecutorResult {
 /// An engine whose executors are synchronous, with room for long loops.
 pub fn engine() -> Engine {
     Engine::builder()
-        .executor("text", text)
-        .executor("math", math)
+        .executor("text", ["trim", "empty"], text)
+        .executor("math", ["add"], math)
         .max_steps(u64::MAX)
         .build()
 }
@@ -170,7 +185,7 @@ pub fn engine() -> Engine {
 /// of the async path itself, with no runtime involved.
 pub fn engine_with_async_math() -> Engine {
     Engine::builder()
-        .async_executor("math", |call| async move { math(call) })
+        .async_executor("math", ["add"], |call| async move { math(call) })
         .max_steps(u64::MAX)
         .build()
 }
@@ -181,7 +196,7 @@ pub fn engine_with_async_math() -> Engine {
 /// event loop in WebAssembly. The same code on both, for a fair comparison.
 pub fn yielding_engine() -> Engine {
     Engine::builder()
-        .async_executor("math", |call| async move {
+        .async_executor("math", ["add"], |call| async move {
             yield_now().await;
             math(call)
         })
@@ -222,11 +237,7 @@ pub async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
                 }
             }
         }
-        if done {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
+        if done { Poll::Ready(()) } else { Poll::Pending }
     })
     .await;
     outputs

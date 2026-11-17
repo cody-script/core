@@ -6,7 +6,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use codyscript_bench as scenario;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 /// Compiling: validation, expression parsing and building the program tree.
 fn compile(c: &mut Criterion) {
@@ -68,6 +68,13 @@ fn run(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1_000));
     group.bench_function("call_loop/1000", |b| {
         b.iter(|| calls.run_blocking(scenario::options(scenario::n(1_000))))
+    });
+
+    // CodyScript function calls per second.
+    let functions = scenario::compile(&engine, &scenario::function_loop());
+    group.throughput(Throughput::Elements(1_000));
+    group.bench_function("function_loop/1000", |b| {
+        b.iter(|| functions.run_blocking(scenario::options(scenario::n(1_000))))
     });
 
     // Lookups per second, from scopes of growing size: should stay flat.

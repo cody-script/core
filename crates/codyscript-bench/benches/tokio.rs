@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use codyscript_bench as scenario;
 use codyscript_core::{CompiledProgram, Engine};
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use tokio::runtime::{Builder, Runtime};
 
 /// Executor calls per run (`call_loop` with `n` = this).

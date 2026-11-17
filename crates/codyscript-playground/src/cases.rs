@@ -2,17 +2,18 @@
 //! module. Each case is what the page passes to `run` — a program, its
 //! variables and limits, as JSON text — and what the outcome must contain.
 //!
-//! Programs may call the page's demo executors, which are JavaScript (they
-//! have to be: calling JavaScript is what's being tested):
+//! Programs may declare (in `ext`) and call the external functions of the
+//! page's demo executors, which are JavaScript (they have to be: calling
+//! JavaScript is what's being tested):
 //!
-//! | Call | Does |
+//! | Function | Does |
 //! |---|---|
 //! | `text.trim`, `text.empty` | trims `input.value`; is it empty (sync) |
 //! | `slow.wait` | waits `arg.ms` on a JavaScript timer, then returns `{ id: arg.id, order }`, `order` counting calls that finished (async) |
 //! | `pair.x` | returns its `input` |
 //! | `fail.throw`, `fail.reject` | throws an `Error(arg)`; rejects with `arg` |
 
-use codyscript_core::{value, Value};
+use codyscript_core::{Value, value};
 use serde::Serialize;
 
 /// One check, as the page receives it.
@@ -33,9 +34,9 @@ pub fn json() -> String {
 }
 
 fn cases() -> Vec<Case> {
-    let readme = value!({ "do": [
-        { "set": { "name": { "op": { "text.trim": { "value": { "ref": "Name" } } } } } },
-        { "if": { "op": { "text.empty": { "value": { "ref": "name" } } } },
+    let readme = value!({ "ext": { "text": ["trim", "empty"] }, "do": [
+        { "set": { "name": { "call": { "text.trim": { "value": { "ref": "Name" } } } } } },
+        { "if": { "call": { "text.empty": { "value": { "ref": "name" } } } },
           "do": [{ "ret": { "val": { "error": "Name is required" } } }], "tag": "name-required" },
         { "ret": { "ref": "name" } }
     ] });
@@ -44,9 +45,16 @@ fn cases() -> Vec<Case> {
         { "for": { "x": "i < n" }, "do": [{ "set": { "i": { "x": "i + 1" } } }, { "set": { "sum": { "x": "sum + i" } } }] },
         { "ret": { "ref": "sum" } }
     ] });
+    let recursive_sum = value!({ "call": { "sum": { "n": { "ref": "n" } } }, "fn": {
+        "sum": { "do": [
+            { "if": { "x": "n == 0" }, "do": [{ "ret": 0 }] },
+            { "set": { "rest": { "call": { "sum": { "n": { "x": "n - 1" } } } } } },
+            { "ret": { "x": "n + rest" } }
+        ] }
+    } });
 
     vec![
-        // Programs, executors and expressions.
+        // Programs, functions and expressions.
         case("The README rule cleans a name", &readme)
             .variables(value!({ "Name": "  Ada " }))
             .expect(value!({ "ok": true, "value": "Ada", "steps": 8 })),
@@ -66,27 +74,48 @@ fn cases() -> Vec<Case> {
         case("A loop: the sum of 1..n", &sum)
             .variables(value!({ "n": 1000 }))
             .returns(value!(500500)),
-        case("Async executors resolve one at a time, in order", &value!({ "op": { "pair.x": {
-            "first": { "op": { "slow.wait": {} }, "arg": { "id": "a", "ms": 30 } },
-            "second": { "op": { "slow.wait": {} }, "arg": { "id": "b", "ms": 0 } }
-        } } }))
+        case("A CodyScript function calls a JavaScript one, seeing only its arguments", &value!({
+            "ext": { "text": ["trim"] },
+            "fn": { "text.clean": { "call": { "text.trim": { "value": { "ref": "value" } } } } },
+            "do": [
+                { "set": { "name": { "call": { "text.clean": { "value": { "ref": "Name" } } } } } },
+                { "ret": { "ref": "name" } }
+            ]
+        }))
+            .variables(value!({ "Name": "  Ada " }))
+            .expect(value!({ "ok": true, "value": "Ada", "variables": { "Name": "  Ada ", "name": "Ada" } })),
+        case("Async functions resolve one at a time, in order", &value!({
+            "ext": { "pair": ["x"], "slow": ["wait"] },
+            "call": { "pair.x": {
+                "first": { "call": { "slow.wait": {} }, "arg": { "id": "a", "ms": 30 } },
+                "second": { "call": { "slow.wait": {} }, "arg": { "id": "b", "ms": 0 } }
+            } }
+        }))
             .returns(value!({ "first": { "id": "a", "order": 1 }, "second": { "id": "b", "order": 2 } })),
         // Every kind of error.
         case("A missing variable", &readme).expect(value!({ "ok": false, "error": {
-            "code": "undefined_variable", "path": "/do/0/set/name/op/text.trim/value"
+            "code": "undefined_variable", "path": "/do/0/set/name/call/text.trim/value"
         } })),
         case("Division by zero", &value!({ "x": "1 / z" }))
             .variables(value!({ "z": 0 }))
             .fails("type_error", r#""/" gave Infinity (division by zero?) in "1 / z" at /x"#),
-        case("A throwing executor", &value!({ "do": [{ "set": { "x": { "op": { "fail.throw": {} }, "arg": "boom", "tag": "n1" } } }] }))
-            .fails("executor_failed", r#"Executor "fail" failed on "throw": boom at /do/0/set/x (tag n1)"#),
-        case("A rejecting executor", &value!({ "op": { "fail.reject": {} }, "arg": "nope" }))
-            .fails("executor_failed", r#"Executor "fail" failed on "reject": nope"#),
+        case("A throwing function", &value!({ "ext": { "fail": ["throw"] },
+            "do": [{ "set": { "x": { "call": { "fail.throw": {} }, "arg": "boom", "tag": "n1" } } }] }))
+            .fails("function_failed", r#"Function "fail.throw" failed: boom at /do/0/set/x (tag n1)"#),
+        case("A rejecting function", &value!({ "ext": { "fail": ["reject"] }, "call": { "fail.reject": {} }, "arg": "nope" }))
+            .fails("function_failed", r#"Function "fail.reject" failed: nope"#),
         case("An endless loop stops at maxSteps", &value!({ "do": [{ "for": true, "do": [], "tag": "spin" }] }))
             .limits(value!({ "maxSteps": 50 }))
             .fails("step_limit", "Program exceeded 50 steps at /do/0/for"),
-        case("An unknown executor is refused before running", &value!({ "op": { "nope.x": {} } }))
-            .fails("unknown_executor", r#"Unknown executor "nope" at /op/nope.x"#),
+        case("Endless recursion stops at maxDepth", &value!({
+            "call": { "spin": {} },
+            "fn": { "spin": { "call": { "spin": {} }, "tag": "again" } }
+        }))
+            .fails("depth_limit", "Calls nest deeper than 128 levels at /fn/spin (tag again)"),
+        case("A function the page doesn't provide is refused before running", &value!({ "ext": { "text": ["trim", "upper"] }, "x": "1" }))
+            .fails("unknown_function", r#"Unknown function "text.upper" at /ext/text/1"#),
+        case("A function the program doesn't declare is refused", &value!({ "call": { "text.trim": {} } }))
+            .fails("invalid_program", r#"Invalid program: Function "text.trim" isn't declared in "ext" at /call/text.trim"#),
         case("An invalid program lists every issue", &value!({ "do": [{ "set": { "": 1 } }, { "ret": [1] }] }))
             .expect(value!({ "ok": false, "error": { "code": "invalid_program", "issues": [
                 { "path": "/do/0/set", "message": "Expected a non-empty string" },
@@ -106,6 +135,10 @@ fn cases() -> Vec<Case> {
             .variables(value!({ "n": 100_000 }))
             .limits(value!({ "maxSteps": 10_000_000 }))
             .returns(value!(5_000_050_000_u64)),
+        case("10 000-deep recursion finishes: calls don't use the stack", &recursive_sum)
+            .variables(value!({ "n": 9_999 }))
+            .limits(value!({ "maxDepth": 10_000, "maxSteps": 10_000_000 }))
+            .returns(value!(49_995_000)),
         case("The module still works after all that", &readme)
             .variables(value!({ "Name": " again " }))
             .returns(value!("again")),

@@ -164,4 +164,11 @@ mod tests {
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["list", "dynamic", "nested"]);
     }
+
+    #[test]
+    fn splices_any_edition_2024_expression() {
+        // Edition 2024's `expr` fragment also matches inline `const` blocks.
+        let v = value!({ "a": const { 1 + 1 }, "b": [const { 3 }] });
+        assert_eq!(v, value!({ "a": 2, "b": [3] }));
+    }
 }

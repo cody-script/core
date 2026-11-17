@@ -9,7 +9,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use codyscript_core::{value, Engine, ErrorCode, RunOptions, Signal, Value};
+use codyscript_core::{Engine, ErrorCode, RunOptions, Signal, Value, value};
 use js_sys::{Function, Object, Reflect};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -21,13 +21,26 @@ fn js(body: &str) -> Function {
     Function::new_with_args("call", body)
 }
 
-/// An executors object: `{ id: function }`.
-fn executors(entries: &[(&str, Function)]) -> JsValue {
+/// An object of these entries.
+fn object(entries: &[(&str, &JsValue)]) -> Object {
     let object = Object::new();
-    for (id, function) in entries {
-        Reflect::set(&object, &JsValue::from_str(id), function).unwrap();
+    for (key, value) in entries {
+        Reflect::set(&object, &JsValue::from_str(key), value).unwrap();
     }
-    object.into()
+    object
+}
+
+/// An executors object: `{ id: { function: (call) => value, … }, … }`.
+fn executors(entries: &[(&str, &[(&str, Function)])]) -> JsValue {
+    let executors = Object::new();
+    for (id, functions) in entries {
+        let functions: Vec<(&str, &JsValue)> = functions
+            .iter()
+            .map(|(name, f)| (*name, f.as_ref()))
+            .collect();
+        Reflect::set(&executors, &JsValue::from_str(id), &object(&functions)).unwrap();
+    }
+    executors.into()
 }
 
 /// Runs through the exported binding; the outcome, parsed.
@@ -42,55 +55,74 @@ fn to_json(value: &Value) -> String {
     codyscript_json::to_string(value).unwrap()
 }
 
-const README_RULE: &str = r#"{ "do": [
-  { "set": { "name": { "op": { "text.trim": { "value": { "ref": "Name" } } } } } },
-  { "if": { "op": { "text.empty": { "value": { "ref": "name" } } } },
+const README_RULE: &str = r#"{ "ext": { "text": ["trim", "empty"] }, "do": [
+  { "set": { "name": { "call": { "text.trim": { "value": { "ref": "Name" } } } } } },
+  { "if": { "call": { "text.empty": { "value": { "ref": "name" } } } },
     "do": [{ "ret": { "val": { "error": "Name is required" } } }], "tag": "name-required" },
   { "ret": { "ref": "name" } } ] }"#;
 
-fn text_executor() -> Function {
-    js(r#"const value = String(call.input.value ?? "");
-          switch (call.op) {
-            case "trim": return value.trim();
-            case "empty": return value.length === 0;
-            default: throw new Error(`text has no "${call.op}"`);
-          }"#)
+/// `text.trim` and `text.empty`.
+fn text_executor() -> JsValue {
+    executors(&[(
+        "text",
+        &[
+            ("trim", js("return String(call.input.value ?? '').trim();")),
+            (
+                "empty",
+                js("return String(call.input.value ?? '').length === 0;"),
+            ),
+        ],
+    )])
 }
 
 // ── Through the JavaScript bindings ─────────────────────────────────────────
 
 #[wasm_bindgen_test]
-async fn the_readme_rule_runs_with_a_javascript_executor() {
-    let exe = || executors(&[("text", text_executor())]);
-    let ok = run(README_RULE, r#"{"Name":"  Ada "}"#, exe(), "").await;
+async fn the_readme_rule_runs_with_javascript_functions() {
+    let ok = run(README_RULE, r#"{"Name":"  Ada "}"#, text_executor(), "").await;
     assert_eq!(ok["ok"], true);
     assert_eq!(ok["value"], "Ada");
     assert_eq!(ok["steps"], 8);
-    let blank = run(README_RULE, r#"{"Name":"  "}"#, exe(), "").await;
+    let blank = run(README_RULE, r#"{"Name":"  "}"#, text_executor(), "").await;
     assert_eq!(blank["value"], value!({ "error": "Name is required" }));
-    let missing = run(README_RULE, "", exe(), "").await;
+    let missing = run(README_RULE, "", text_executor(), "").await;
     assert_eq!(missing["ok"], false);
     assert_eq!(missing["error"]["code"], "undefined_variable");
     assert_eq!(
         missing["error"]["path"],
-        "/do/0/set/name/op/text.trim/value"
+        "/do/0/set/name/call/text.trim/value"
     );
 }
 
 #[wasm_bindgen_test]
-async fn async_executors_are_awaited_on_the_event_loop_in_order() {
+async fn an_executors_functions_are_the_keys_of_its_object() {
+    // `text` provides trim and empty, so a program declaring text.upper is
+    // refused when compiled: the host's object is the list.
+    let program = r#"{ "ext": { "text": ["trim", "upper"] }, "x": "1" }"#;
+    let outcome = run(program, "", text_executor(), "").await;
+    assert_eq!(outcome["error"]["code"], "unknown_function");
+    assert_eq!(outcome["error"]["path"], "/ext/text/1");
+    // A function name may contain dots; the call splits at the first.
+    let echo = executors(&[("echo", &[("do.it", js("return call.op;"))])]);
+    let program = r#"{ "ext": { "echo": ["do.it"] }, "call": { "echo.do.it": {} } }"#;
+    let outcome = run(program, "", echo, "").await;
+    assert_eq!(outcome["value"], "do.it");
+}
+
+#[wasm_bindgen_test]
+async fn async_functions_are_awaited_on_the_event_loop_in_order() {
     let slow = js(r#"return new Promise((resolve) => setTimeout(() => {
                        (globalThis.__cody_log ??= []).push(call.arg);
                        resolve(call.arg);
                      }, call.arg === "a" ? 20 : 0));"#);
     let pair = js("return call.input;");
-    let program = r#"{ "op": { "pair.x": {
-        "first": { "op": { "slow.x": {} }, "arg": "a" },
-        "second": { "op": { "slow.x": {} }, "arg": "b" } } } }"#;
+    let program = r#"{ "ext": { "slow": ["x"], "pair": ["x"] }, "call": { "pair.x": {
+        "first": { "call": { "slow.x": {} }, "arg": "a" },
+        "second": { "call": { "slow.x": {} }, "arg": "b" } } } }"#;
     let outcome = run(
         program,
         "",
-        executors(&[("slow", slow), ("pair", pair)]),
+        executors(&[("slow", &[("x", slow)]), ("pair", &[("x", pair)])]),
         "",
     )
     .await;
@@ -100,19 +132,29 @@ async fn async_executors_are_awaited_on_the_event_loop_in_order() {
 }
 
 #[wasm_bindgen_test]
-async fn executors_receive_op_arg_and_input_as_plain_objects() {
-    let echo = js("return call;");
-    let program =
-        r#"{ "op": { "echo.do.it": { "a": 1, "b": { "x": "n * 2" } } }, "arg": { "cfg": true } }"#;
-    let outcome = run(program, r#"{"n":21}"#, executors(&[("echo", echo)]), "").await;
+async fn functions_receive_op_arg_and_input_as_plain_objects() {
+    let echo = executors(&[("echo", &[("it", js("return call;"))])]);
+    let program = r#"{ "ext": { "echo": ["it"] },
+        "call": { "echo.it": { "a": 1, "b": { "x": "n * 2" } } }, "arg": { "cfg": true } }"#;
+    let outcome = run(program, r#"{"n":21}"#, echo, "").await;
     assert_eq!(
         to_json(&outcome["value"]),
-        r#"{"op":"do.it","arg":{"cfg":true},"input":{"a":1,"b":42}}"#
+        r#"{"op":"it","arg":{"cfg":true},"input":{"a":1,"b":42}}"#
     );
 }
 
 #[wasm_bindgen_test]
-async fn what_an_executor_returns_comes_back_as_json() {
+async fn javascript_and_codyscript_functions_call_each_other() {
+    let program = r#"{
+        "ext": { "text": ["trim"] },
+        "fn": { "text.clean": { "call": { "text.trim": { "value": { "ref": "value" } } } } },
+        "call": { "text.clean": { "value": { "ref": "Name" } } } }"#;
+    let outcome = run(program, r#"{"Name":"  Ada "}"#, text_executor(), "").await;
+    assert_eq!(outcome["value"], "Ada");
+}
+
+#[wasm_bindgen_test]
+async fn what_a_function_returns_comes_back_as_json() {
     let cases = [
         ("return undefined;", "null"),
         ("return NaN;", "null"),
@@ -125,9 +167,9 @@ async fn what_an_executor_returns_comes_back_as_json() {
     ];
     for (body, expected) in cases {
         let outcome = run(
-            r#"{ "op": { "f.x": {} } }"#,
+            r#"{ "ext": { "f": ["x"] }, "call": { "f.x": {} } }"#,
             "",
-            executors(&[("f", js(body))]),
+            executors(&[("f", &[("x", js(body))])]),
             "",
         )
         .await;
@@ -136,28 +178,41 @@ async fn what_an_executor_returns_comes_back_as_json() {
 }
 
 #[wasm_bindgen_test]
-async fn a_throwing_or_rejecting_executor_fails_the_run() {
+async fn a_throwing_or_rejecting_function_fails_the_run() {
     let cases = [
         ("throw new Error('boom');", ": boom"),
         ("return Promise.reject('nope');", ": nope"),
         ("throw { code: 7 };", r#": {"code":7}"#),
     ];
     for (body, suffix) in cases {
-        let program = r#"{ "do": [{ "set": { "x": { "op": { "bad.go": {} }, "tag": "n1" } } }] }"#;
-        let outcome = run(program, "", executors(&[("bad", js(body))]), "").await;
+        let program = r#"{ "ext": { "bad": ["go"] },
+            "do": [{ "set": { "x": { "call": { "bad.go": {} }, "tag": "n1" } } }] }"#;
+        let outcome = run(program, "", executors(&[("bad", &[("go", js(body))])]), "").await;
         let error = &outcome["error"];
-        assert_eq!(error["code"], "executor_failed", "{body}");
+        assert_eq!(error["code"], "function_failed", "{body}");
         assert_eq!(error["path"], "/do/0/set/x");
         assert_eq!(error["tag"], "n1");
-        let expected = format!(r#"Executor "bad" failed on "go"{suffix} at /do/0/set/x (tag n1)"#);
+        let expected = format!(r#"Function "bad.go" failed{suffix} at /do/0/set/x (tag n1)"#);
         assert_eq!(error["message"], expected.as_str());
     }
 }
 
 #[wasm_bindgen_test]
 async fn compile_errors_limits_and_expressions() {
-    let nope = run(r#"{ "op": { "nope.x": {} } }"#, "", JsValue::NULL, "").await;
-    assert_eq!(nope["error"]["code"], "unknown_executor");
+    let nope = r#"{ "ext": { "nope": ["x"] }, "call": { "nope.x": {} } }"#;
+    let nope = run(nope, "", JsValue::NULL, "").await;
+    assert_eq!(nope["error"]["code"], "unknown_function");
+    let undeclared = run(
+        r#"{ "call": { "text.trim": {} } }"#,
+        "",
+        text_executor(),
+        "",
+    )
+    .await;
+    assert_eq!(
+        undeclared["error"]["message"],
+        r#"Invalid program: Function "text.trim" isn't declared in "ext" at /call/text.trim"#
+    );
 
     let not_json = run(r#"{ "x": "1 + 2" "#, "", JsValue::NULL, "").await;
     assert_eq!(not_json["error"]["code"], "invalid_program");
@@ -193,8 +248,13 @@ async fn wrong_arguments_reject() {
     assert!(run("[1]", JsValue::NULL, "").await.is_err());
     assert!(run("", JsValue::NULL, "nope").await.is_err());
     assert!(run("", JsValue::from(3), "").await.is_err());
-    let not_a_function = Object::new();
-    Reflect::set(&not_a_function, &"f".into(), &JsValue::from(1)).unwrap();
+    // An executor must be an object of functions: not a number, not a
+    // function (the 0.5 shape), and each of its values a function.
+    let number = object(&[("f", &JsValue::from(1))]);
+    assert!(run("", number.into(), "").await.is_err());
+    let function = object(&[("f", js("return 1;").as_ref())]);
+    assert!(run("", function.into(), "").await.is_err());
+    let not_a_function = object(&[("f", object(&[("x", &JsValue::from(1))]).as_ref())]);
     assert!(run("", not_a_function.into(), "").await.is_err());
 }
 
@@ -275,18 +335,36 @@ async fn hostile_input_fails_cleanly_rather_than_overflowing() {
     assert_eq!(outcome["error"]["code"], "invalid_program");
 }
 
+#[wasm_bindgen_test]
+async fn deep_recursion_doesnt_use_the_stack() {
+    // Calls are entries on the machine's own stacks: 10 000 nested calls
+    // need no more of WebAssembly's stack than one.
+    let program = value!({ "call": { "sum": { "n": 9_999 } }, "fn": {
+        "sum": { "do": [
+            { "if": { "x": "n == 0" }, "do": [{ "ret": 0 }] },
+            { "set": { "rest": { "call": { "sum": { "n": { "x": "n - 1" } } } } } },
+            { "ret": { "x": "n + rest" } }
+        ] }
+    } });
+    let limits = r#"{ "maxDepth": 10000, "maxSteps": 10000000 }"#;
+    let outcome = run(&to_json(&program), "", JsValue::NULL, limits).await;
+    assert_eq!(outcome["value"], 49_995_000);
+    let outcome = run(&to_json(&program), "", JsValue::NULL, "").await;
+    assert_eq!(outcome["error"]["code"], "depth_limit");
+}
+
 // ── The core, directly ──────────────────────────────────────────────────────
 
 #[wasm_bindgen_test]
 fn the_blocking_runner_works_with_sync_executors() {
     let engine = Engine::builder()
-        .executor("math", |call| {
+        .executor("math", ["double"], |call| {
             let a = call.input.get("a").and_then(Value::as_f64).unwrap_or(0.0);
             Ok(value!(a * 2.0))
         })
         .build();
-    let program = value!({ "do": [
-        { "set": { "d": { "op": { "math.double": { "a": { "ref": "n" } } } } } },
+    let program = value!({ "ext": { "math": ["double"] }, "do": [
+        { "set": { "d": { "call": { "math.double": { "a": { "ref": "n" } } } } } },
         { "ret": { "x": "d + 1" } }
     ] });
     let options = RunOptions::from(value!({ "n": 20 }).into_object().unwrap());
@@ -297,12 +375,13 @@ fn the_blocking_runner_works_with_sync_executors() {
 fn a_signal_aborts_a_run() {
     let signal = Signal::new();
     let engine = Engine::builder()
-        .executor("stop", |call| {
+        .executor("stop", ["x"], |call| {
             call.signal.expect("the run's signal").abort_with("enough");
             Ok(value!(true))
         })
         .build();
-    let program = value!({ "do": [{ "for": { "op": { "stop.x": {} } }, "do": [] }] });
+    let program = value!({ "ext": { "stop": ["x"] },
+        "do": [{ "for": { "call": { "stop.x": {} } }, "do": [] }] });
     let error = engine
         .run_blocking(&program, RunOptions::new().with_signal(signal))
         .unwrap_err();

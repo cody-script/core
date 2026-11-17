@@ -464,7 +464,7 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut dyn Context<'v>) -> Result<Val
                         return Err(Fault::Type(format!(
                             "\"-\" needs a number, got {}",
                             a.kind()
-                        )))
+                        )));
                     }
                 });
             }
@@ -509,7 +509,7 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
                     return Err(format!(
                         "\"{sym}\" needs two numbers or two texts, got {}",
                         pair()
-                    ))
+                    ));
                 }
             };
             Ok(V::Bool(match order {
@@ -666,10 +666,12 @@ mod tests {
         assert_eq!(number(-0.0).as_i64(), Some(0));
         assert_eq!(number(1e18).as_i64(), Some(1_000_000_000_000_000_000));
         assert!(number(2.5).as_number().unwrap().is_f64());
-        assert!(number(-9_223_372_036_854_775_808.0)
-            .as_number()
-            .unwrap()
-            .is_f64());
+        assert!(
+            number(-9_223_372_036_854_775_808.0)
+                .as_number()
+                .unwrap()
+                .is_f64()
+        );
         assert_eq!(number(f64::INFINITY).as_f64(), Some(f64::INFINITY));
     }
 

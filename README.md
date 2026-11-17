@@ -1,15 +1,19 @@
 # CodyScript for Rust
 
 CodyScript is a small, sandboxed interpreter for programs written as data.
-The **host** decides what a program can do by handing it a set of
-**executors**; the **program** — stored config, written by a person or an
-editor — supplies the logic: variables, conditions, loops and calls to those
-executors. Nothing else is reachable.
+The **host** decides what a program can do by handing it **executors**,
+which provide named external functions; the **program** — stored config,
+written by a person or an editor — supplies the logic: variables,
+conditions, loops, functions of its own, and calls to those and to the
+host's. Nothing else is reachable.
 
 It is meant for rules that live in data rather than code: a tenant's CSV
 mapping, a validation rule, a pipeline step. It's a port of the TypeScript
-package `@cody-script/core` 0.5 and runs the same programs the same way. It
-has no `unsafe` code and works with any async runtime, or none. MIT licensed.
+package `@cody-script/core` 0.5; 0.6 changes the program format — every
+call is a call of a [function](crates/codyscript-core/README.md#functions),
+the host's or the program's own — which the TypeScript package doesn't have
+yet. It has no `unsafe` code and works with any async runtime, or none. MIT
+licensed.
 
 ## The crates
 
@@ -39,9 +43,11 @@ it. The core never changes for a new format.
 
 ```toml
 [dependencies]
-codyscript-core = "0.5"
-codyscript-json = "0.5"   # if your programs are stored as JSON
+codyscript-core = "0.6"
+codyscript-json = "0.6"   # if your programs are stored as JSON
 ```
+
+The crates need Rust 1.99 or newer (edition 2024).
 
 ## Quick start
 
@@ -49,10 +55,11 @@ A rule that cleans a CSV row's `Name` column and refuses a blank one:
 
 ```json
 {
+  "ext": { "text": ["trim", "empty"] },
   "do": [
-    { "set": { "name": { "op": { "text.trim": { "value": { "ref": "Name" } } } } } },
+    { "set": { "name": { "call": { "text.trim": { "value": { "ref": "Name" } } } } } },
     {
-      "if": { "op": { "text.empty": { "value": { "ref": "name" } } } },
+      "if": { "call": { "text.empty": { "value": { "ref": "name" } } } },
       "do": [{ "ret": { "val": { "error": "Name is required" } } }],
       "tag": "name-required"
     },
@@ -60,6 +67,10 @@ A rule that cleans a CSV row's `Name` column and refuses a blank one:
   ]
 }
 ```
+
+`ext` declares the host functions the rule uses — here `text.trim` and
+`text.empty`, which the host below provides — and `call` calls them. A
+rule can also define functions of its own, in CodyScript.
 
 ```rust
 use codyscript_core::{Engine, ExecutorCall, ExecutorResult, RunOptions, Value, Variables};
@@ -75,13 +86,13 @@ fn text(call: ExecutorCall) -> ExecutorResult {
 }
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let rule_json = r#"{ "do": [
-#   { "set": { "name": { "op": { "text.trim": { "value": { "ref": "Name" } } } } } },
-#   { "if": { "op": { "text.empty": { "value": { "ref": "name" } } } },
+# let rule_json = r#"{ "ext": { "text": ["trim", "empty"] }, "do": [
+#   { "set": { "name": { "call": { "text.trim": { "value": { "ref": "Name" } } } } } },
+#   { "if": { "call": { "text.empty": { "value": { "ref": "name" } } } },
 #     "do": [{ "ret": { "val": { "error": "Name is required" } } }], "tag": "name-required" },
 #   { "ret": { "ref": "name" } } ] }"#;
 # let rows_json = [r#"{ "Name": "  Ada " }"#];
-let engine = Engine::builder().executor("text", text).build();
+let engine = Engine::builder().executor("text", ["trim", "empty"], text).build();
 
 let rule = engine.compile_json(rule_json)?;                   // validate once…
 for row in rows_json {
@@ -94,9 +105,9 @@ for row in rows_json {
 # }
 ```
 
-`compile` checks the program's shape, depth, expression syntax and every
-executor id up front, so a broken rule fails when it's saved — not halfway
-through a file. In async code, `rule.run(options).await` instead.
+`compile` checks the program's shape, depth, expression syntax, every call,
+and that the host provides every function it declares, up front — so a
+broken rule fails when it's saved, not halfway through a file. In async code, `rule.run(options).await` instead.
 
 ## WebAssembly
 

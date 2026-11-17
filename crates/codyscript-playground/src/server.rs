@@ -1,11 +1,11 @@
 //! Serves the page, the checklist and the module, from memory, on
 //! 127.0.0.1 only.
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::response::IntoResponse;
-use axum::routing::{get, MethodRouter};
-use axum::Router;
+use axum::routing::{MethodRouter, get};
 
 use crate::cases;
 use crate::wasm::Module;

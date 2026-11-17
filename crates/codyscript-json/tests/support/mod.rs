@@ -1,5 +1,5 @@
 //! Test support: the core's shared fixtures, and the READMEs' JSON blocks.
-#![allow(dead_code)]
+#![allow(dead_code, reason = "shared by several test crates, each using some")]
 
 use codyscript_core::Value;
 

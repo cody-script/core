@@ -1,7 +1,7 @@
 {
 	"name": "@cody-script/core-wasm",
 	"version": "0.0.0",
-	"description": "CodyScript compiled to WebAssembly: run programs written as JSON from JavaScript, with executors written in JavaScript.",
+	"description": "CodyScript compiled to WebAssembly: run programs written as JSON from JavaScript, with external functions written in JavaScript.",
 	"author": "Cody Pope",
 	"license": "MIT",
 	"keywords": ["interpreter", "sandbox", "json", "rules", "dsl", "webassembly", "wasm"],

@@ -6,7 +6,7 @@ mod common;
 mod support;
 
 use codyscript_core::Value;
-use codyscript_json::{to_serde_json, SCHEMA};
+use codyscript_json::{SCHEMA, to_serde_json};
 
 fn validator() -> jsonschema::Validator {
     let schema: serde_json::Value = serde_json::from_str(SCHEMA).expect("schema.json is JSON");
@@ -47,9 +47,9 @@ fn accepts_every_program_in_the_readmes() {
         .into_iter()
         .flat_map(support::readme_json_blocks)
         .map(|(_, json)| json)
-        .filter(|json| json.get("do").is_some())
+        .filter(|json| json.get("do").is_some() || json.get("fn").is_some())
         .collect();
-    assert_eq!(programs.len(), 2);
+    assert_eq!(programs.len(), 3);
     for program in programs {
         assert!(
             validator.is_valid(&to_serde_json(&program)),

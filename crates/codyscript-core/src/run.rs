@@ -2,44 +2,48 @@
 //!
 //! The interpreter is a machine with explicit stacks — tasks to do, values
 //! produced, block results, scopes — driven by one loop. Nothing recurses, so
-//! the stack a run uses doesn't grow with the program's depth: a deeply
-//! nested program can't overflow it, natively or under WebAssembly's small
-//! stack. The loop's only `.await` is an executor call.
+//! the stack a run uses doesn't grow with the program's depth, nor with how
+//! deeply its functions call each other: neither can overflow it, natively or
+//! under WebAssembly's small stack. The loop's only `.await` is an executor
+//! call.
 //!
 //! Every step is counted at the moment the recursive definition (the
 //! TypeScript engine) counts it, and in the same order: an instruction or
 //! input is a step when it starts, before its parts.
 
-use crate::engine::{Executors, RunOptions, RunResult, Variables};
+use crate::engine::{Executors, Limits, RunOptions, RunResult, Variables};
 use crate::error::{Cause, Details, Error, ErrorCode};
 use crate::executor::{ExecutorCall, Signal};
 use crate::expression::{self, Fault};
-use crate::program::{Expression, Input, InputKind, Instruction, InstructionKind, Operation};
+use crate::program::{
+    Call, Expression, External, Input, InputKind, Instruction, InstructionKind, Program,
+};
 use crate::value::{Map, Value};
 
-/// Runs `root` to completion.
+/// Runs `program`'s body to completion.
 pub(crate) async fn run(
-    root: &Input,
+    program: &Program,
     executors: &Executors,
-    max_steps: u64,
+    limits: Limits,
     options: RunOptions,
 ) -> Result<RunResult, Error> {
     let mut machine = Machine {
         executors,
-        max_steps,
+        functions: &program.functions,
+        max_steps: limits.max_steps,
+        max_depth: limits.max_depth,
         signal: options.signal,
         steps: 0,
         scopes: vec![options.variables],
+        base: 0,
+        calls: 0,
         tasks: Vec::new(),
         values: Vec::new(),
         results: Vec::new(),
     };
-    match &root.kind {
-        // A top-level block runs in the root scope, so its assignments are
-        // the result's variables. It isn't a step of its own.
-        InputKind::Do(list) => machine.enter_block(list, false),
-        _ => machine.tasks.push(Task::Resolve(root)),
-    }
+    // The body runs in the root scope, so its assignments are the result's
+    // variables.
+    machine.enter(&program.body);
     machine.drive().await?;
     Ok(RunResult {
         value: machine.values.pop().unwrap_or_default(),
@@ -56,8 +60,11 @@ enum Task<'p> {
     List(&'p [Instruction]),
     /// Run this instruction.
     Execute(&'p Instruction),
-    /// Call the executor with the arguments on the value stack.
-    Call(&'p Operation, &'p Input),
+    /// Call the external function with the arguments on the value stack.
+    Call(&'p External, &'p Input),
+    /// Run the function with the arguments on the value stack as its
+    /// variables.
+    Invoke(&'p Call, &'p Input),
     /// Assign the value to this variable in the current scope.
     Assign(&'p str),
     /// End the current block with the value.
@@ -75,17 +82,29 @@ enum Task<'p> {
     /// The current block is over: its result becomes a value, and its
     /// scope, if it has its own, goes.
     EndBlock { scoped: bool },
+    /// The current function is over: its value stays, its scopes go, and
+    /// the caller's, from `base` up, are visible again.
+    EndCall { base: usize },
 }
 
 /// One run's state.
 struct Machine<'p, 'e> {
     executors: &'e Executors,
+    /// The program's function bodies, by index.
+    functions: &'p [Input],
     max_steps: u64,
+    /// How deeply calls may nest.
+    max_depth: usize,
     signal: Option<Signal>,
     steps: u64,
     /// Variables: a block pushes its own scope, reads fall through to the
     /// enclosing ones, and `set` writes the innermost.
     scopes: Vec<Variables>,
+    /// Where the running function's scopes start: reads don't fall through
+    /// below it, so a function sees only its own variables.
+    base: usize,
+    /// How many calls are running.
+    calls: usize,
     tasks: Vec<Task<'p>>,
     values: Vec<Value>,
     /// What each running block will return (`null` until a `ret`).
@@ -144,6 +163,12 @@ impl<'p> Machine<'p, '_> {
                 let result = self.results.pop().unwrap_or_default();
                 self.values.push(result);
             }
+            Task::Invoke(call, node) => self.invoke(call, node)?,
+            Task::EndCall { base } => {
+                self.scopes.truncate(self.base);
+                self.base = base;
+                self.calls -= 1;
+            }
             Task::Call(..) => unreachable!("calls are awaited by drive()"),
         }
         Ok(())
@@ -168,17 +193,25 @@ impl<'p> Machine<'p, '_> {
                 }
             },
             InputKind::X(expression) => self.expression(expression, input.tag.as_deref())?,
-            InputKind::Op(operation) => {
+            InputKind::External(external) => {
                 // Arguments resolve one at a time, in order: the first
                 // pushed last, so it runs first.
-                self.tasks.push(Task::Call(operation, input));
-                for (_, argument) in operation.args.iter().rev() {
+                self.tasks.push(Task::Call(external, input));
+                for (_, argument) in external.args.iter().rev() {
                     self.tasks.push(Task::Resolve(argument));
                 }
                 return Ok(());
             }
             InputKind::Do(list) => {
                 self.enter_block(list, true);
+                return Ok(());
+            }
+            InputKind::Call(call) => {
+                // As for an external function: arguments first, in order.
+                self.tasks.push(Task::Invoke(call, input));
+                for (_, argument) in call.args.iter().rev() {
+                    self.tasks.push(Task::Resolve(argument));
+                }
                 return Ok(());
             }
         };
@@ -216,6 +249,48 @@ impl<'p> Machine<'p, '_> {
         Ok(())
     }
 
+    /// Starts a function's body — or the program's — in the current scope.
+    /// A body that is a block runs its instructions there directly; like any
+    /// program's top-level block, it isn't a step of its own.
+    fn enter(&mut self, body: &'p Input) {
+        match &body.kind {
+            InputKind::Do(list) => self.enter_block(list, false),
+            _ => self.tasks.push(Task::Resolve(body)),
+        }
+    }
+
+    /// Calls a function: its arguments, on the value stack, become the
+    /// variables of a fresh scope that the caller's can't be read through,
+    /// and its body runs there until `EndCall`.
+    fn invoke(&mut self, call: &'p Call, node: &'p Input) -> Result<(), Error> {
+        if self.calls >= self.max_depth {
+            let message = format!("Calls nest deeper than {} levels", self.max_depth);
+            let tag = node.tag.as_deref();
+            return Err(failure(
+                ErrorCode::DepthLimit,
+                message,
+                &node.path,
+                tag,
+                None,
+            ));
+        }
+        let at = self.values.len().saturating_sub(call.args.len());
+        let values = self.values.split_off(at);
+        let variables: Variables = call
+            .args
+            .iter()
+            .map(|(name, _)| name.clone())
+            .zip(values)
+            .collect();
+        self.calls += 1;
+        self.tasks.push(Task::EndCall { base: self.base });
+        self.base = self.scopes.len();
+        self.scopes.push(variables);
+        let functions = self.functions;
+        self.enter(&functions[call.function]);
+        Ok(())
+    }
+
     /// Starts a block: its own scope (unless it's the top-level one), a
     /// `null` result, and its instructions.
     fn enter_block(&mut self, list: &'p [Instruction], scoped: bool) {
@@ -235,52 +310,44 @@ impl<'p> Machine<'p, '_> {
         if let Some(result) = self.results.last_mut() {
             *result = value;
         }
-        while let Some(task) = self.tasks.last() {
-            if matches!(task, Task::EndBlock { .. }) {
-                break;
-            }
-            self.tasks.pop();
-        }
+        while self
+            .tasks
+            .pop_if(|task| !matches!(task, Task::EndBlock { .. }))
+            .is_some()
+        {}
     }
 
-    async fn call(&mut self, operation: &Operation, node: &Input) -> Result<Value, Error> {
+    async fn call(&mut self, external: &External, node: &Input) -> Result<Value, Error> {
         let tag = node.tag.as_deref();
-        let at = self.values.len().saturating_sub(operation.args.len());
+        let at = self.values.len().saturating_sub(external.args.len());
         let values = self.values.split_off(at);
-        let input: Map = operation
+        let input: Map = external
             .args
             .iter()
             .map(|(name, _)| name.clone())
             .zip(values)
             .collect();
+        let name = || format!("{}.{}", external.exe, external.op);
         // Checked by validate() against this engine's own executors.
-        let Some(executor) = self.executors.get(&operation.exe) else {
-            let message = format!("Unknown executor \"{}\"", operation.exe);
-            return Err(failure(
-                ErrorCode::UnknownExecutor,
-                message,
-                &node.path,
-                tag,
-                None,
-            ));
+        let Some(registered) = self.executors.get(&external.exe) else {
+            let message = format!("Unknown function \"{}\"", name());
+            let code = ErrorCode::UnknownFunction;
+            return Err(failure(code, message, &node.path, tag, None));
         };
         let call = ExecutorCall {
-            op: operation.op.clone(),
-            arg: operation.arg.clone(),
+            op: external.op.clone(),
+            arg: external.arg.clone(),
             input,
             signal: self.signal.clone(),
         };
-        executor.call(call).await.map_err(|error| {
+        registered.executor.call(call).await.map_err(|error| {
             match error.downcast::<Error>() {
                 // An executor's own engine error passes through unchanged.
                 Ok(own) => *own,
                 Err(cause) => {
-                    let message = format!(
-                        "Executor \"{}\" failed on \"{}\": {cause}",
-                        operation.exe, operation.op
-                    );
+                    let message = format!("Function \"{}\" failed: {cause}", name());
                     let cause = Some(Cause::from(cause));
-                    failure(ErrorCode::ExecutorFailed, message, &node.path, tag, cause)
+                    failure(ErrorCode::FunctionFailed, message, &node.path, tag, cause)
                 }
             }
         })
@@ -288,7 +355,7 @@ impl<'p> Machine<'p, '_> {
 
     fn expression(&mut self, expression: &Expression, tag: Option<&str>) -> Result<Value, Error> {
         let mut cx = ExpressionContext {
-            scopes: &self.scopes,
+            scopes: &self.scopes[self.base..],
             steps: &mut self.steps,
             max_steps: self.max_steps,
             signal: self.signal.as_ref(),
@@ -319,12 +386,13 @@ impl<'p> Machine<'p, '_> {
         )
     }
 
+    /// A variable the running function can see.
     fn get(&self, name: &str) -> Option<&Value> {
-        lookup(&self.scopes, name)
+        lookup(&self.scopes[self.base..], name)
     }
 
     fn scope(&mut self) -> &mut Variables {
-        // The root scope is never popped.
+        // The root scope is never popped, nor a function's while it runs.
         let last = self.scopes.len() - 1;
         &mut self.scopes[last]
     }

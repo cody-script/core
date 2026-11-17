@@ -6,8 +6,8 @@ use std::io;
 use std::sync::Arc;
 
 use codyscript_core::{CompiledProgram, Details, Engine, Error, ErrorCode, Issue, Number, Value};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// The core crate, re-exported so its version always matches this one.
 pub use codyscript_core;
@@ -16,8 +16,9 @@ pub use serde_json;
 
 /// A JSON Schema (draft 2020-12) for the language, for editors to check
 /// hand-written programs against. It checks shape only;
-/// [`Engine::compile`] also checks executor ids, nesting depth, expression
-/// syntax and that numbers are finite.
+/// [`Engine::compile`] also checks what each call names, the external
+/// functions the host provides, nesting depth, expression syntax and that
+/// numbers are finite.
 pub const SCHEMA: &str = include_str!("../schema.json");
 
 // ── Reading ─────────────────────────────────────────────────────────────────

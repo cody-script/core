@@ -39,12 +39,13 @@ cargo bench -p codyscript-bench --bench speed -- --baseline before
 
 | Benchmark | Scenario |
 |---|---|
-| `compile/readme`, `compile/fee` | Compiling the README's rule (two executor calls) and an expressions-only rule. |
+| `compile/readme`, `compile/fee` | Compiling the README's rule (two external calls) and an expressions-only rule. |
 | `compile/deep` | The deepest program the default `max_depth` allows (42 nested blocks). |
 | `compile/wide/{10,100,1000}` | Programs of that many instructions, each with its own expression: compile cost per instruction. |
 | `run/readme`, `run/fee`, `run/deep` | Running those, once compiled. |
 | `run/sum_loop/{10…10000}` | A loop of expressions: throughput in steps per second, as programs grow. |
 | `run/call_loop/1000` | 1,000 calls to a synchronous executor: the cost of a call. |
+| `run/function_loop/1000` | 1,000 calls to a CodyScript function (`fn`): the cost of a call with a fresh scope. |
 | `run/lookup/{4,64,1024}` | 1,000 variable reads from a scope of that many variables. |
 | `json/parse`, `json/end_to_end` | Parsing the README rule; parse, compile, run and print it, as a JSON host does per row. |
 | `tokio/executor/…` | One run making 100 executor calls: `blocking` (`run_blocking`), on Tokio's `current_thread` or `multi_thread` runtime, or on the JavaScript `event_loop` (WebAssembly) — with `sync` executors, `async_ready` ones (async, but never waiting) and `yielding` ones (suspending once per call, as I/O would; the same code on both runtimes). |
@@ -78,8 +79,14 @@ From the machine this was written on: 4 vCPUs (Intel Xeon, 2.6 GHz), Rust
 | `run/fee` | 1.4 µs | 2.4 µs | 1.8× |
 | `run/sum_loop/1000` | 1.1 ms (12 M steps/s) | 1.6 ms | 1.4× |
 | `run/call_loop/1000` | 1.0 ms (1 M calls/s) | 1.7 ms | 1.6× |
+| `run/function_loop/1000` | 0.61 ms (1.6 M calls/s) | 0.84 ms | 1.4× |
 | `json/parse` | 5.2 µs (41 MiB/s) | 5.2 µs | 1.0× |
 | `json/end_to_end` | 17 µs | 24 µs | 1.5× |
+
+`run/function_loop` was measured in a later session, in which
+`run/call_loop` took 0.54 ms natively and 0.91 ms in WebAssembly: a call of a
+CodyScript function, fresh scope and all, costs about what a call of a
+synchronous external one does.
 
 Natively, `run/sum_loop` holds 11–12 M steps/s from 10 to 10,000 passes, and
 `run/lookup` 1.0–1.2 M reads/s whether the scope has 4 variables or 1,024.
