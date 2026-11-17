@@ -1,6 +1,6 @@
 //! [`Engine`] → [`CompiledProgram`] → [`RunResult`]: scopes, steps, errors.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -9,8 +9,8 @@ use std::task::{Context, Poll, Wake, Waker};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
-use crate::executor::{from_async_fn, from_fn, Executor, ExecutorCall, ExecutorResult, Signal};
-use crate::program::Input;
+use crate::executor::{Executor, ExecutorCall, ExecutorResult, Signal, from_async_fn, from_fn};
+use crate::program::Program;
 use crate::run;
 use crate::validate::validate;
 use crate::value::{Map, Value};
@@ -29,9 +29,9 @@ pub struct Limits {
     /// Nodes evaluated per run (each instruction, input, loop test and
     /// expression operand). Default 100 000.
     pub max_steps: u64,
-    /// Maximum JSON nesting depth of a program, and of an expression's
-    /// parentheses and unary operators. Default 128. Compiling recurses this
-    /// deep, so keep it modest.
+    /// Maximum JSON nesting depth of a program, of an expression's
+    /// parentheses and unary operators, and of function calls while running.
+    /// Default 128. Compiling recurses this deep, so keep it modest.
     pub max_depth: usize,
 }
 
@@ -99,7 +99,31 @@ pub struct RunResult {
     pub steps: u64,
 }
 
-pub(crate) type Executors = HashMap<String, Arc<dyn Executor>>;
+/// The engine's executors by id, each with the functions it provides.
+pub(crate) type Executors = HashMap<String, Registered>;
+
+pub(crate) struct Registered {
+    /// Its functions' names within it (`trim` for `text.trim`).
+    pub functions: BTreeSet<String>,
+    pub executor: Arc<dyn Executor>,
+}
+
+/// Whether `executors` provide `exe`'s function `op`.
+fn provides(executors: &Executors, exe: &str, op: &str) -> bool {
+    executors
+        .get(exe)
+        .is_some_and(|registered| registered.functions.contains(op))
+}
+
+/// Every function `executors` provide, by full name (`text.trim`), sorted.
+fn function_names(executors: &Executors) -> Vec<String> {
+    let mut names: Vec<String> = executors
+        .iter()
+        .flat_map(|(id, r)| r.functions.iter().map(move |op| format!("{id}.{op}")))
+        .collect();
+    names.sort_unstable();
+    names
+}
 
 struct Inner {
     executors: Executors,
@@ -136,17 +160,21 @@ impl Engine {
         self.inner.limits
     }
 
-    /// Whether programs may call executor `id`.
-    pub fn has_executor(&self, id: &str) -> bool {
-        self.inner.executors.contains_key(id)
+    /// Whether the engine provides external function `name`
+    /// (`"text.trim"`): its executor's id, a dot, and one of the functions
+    /// it was registered with.
+    pub fn has_function(&self, name: &str) -> bool {
+        name.split_once('.')
+            .is_some_and(|(exe, op)| provides(&self.inner.executors, exe, op))
     }
 
-    /// Validates `program` (shape, depth, executor ids, expression syntax)
-    /// once, and copies it: later changes to `program` can't reach the result.
+    /// Validates `program` (shape, depth, functions, expression syntax, and
+    /// that the engine provides every external function it declares) once,
+    /// and copies it: later changes to `program` can't reach the result.
     pub fn compile(&self, program: &Value) -> Result<CompiledProgram, Error> {
         let executors = &self.inner.executors;
-        let root = validate(program, self.inner.limits.max_depth, &|id| {
-            executors.contains_key(id)
+        let root = validate(program, self.inner.limits.max_depth, &|exe, op| {
+            provides(executors, exe, op)
         })?;
         Ok(CompiledProgram {
             engine: Arc::clone(&self.inner),
@@ -168,10 +196,8 @@ impl Engine {
 
 impl fmt::Debug for Engine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut ids: Vec<&str> = self.inner.executors.keys().map(String::as_str).collect();
-        ids.sort_unstable();
         f.debug_struct("Engine")
-            .field("executors", &ids)
+            .field("functions", &function_names(&self.inner.executors))
             .field("limits", &self.inner.limits)
             .finish()
     }
@@ -185,46 +211,58 @@ pub struct EngineBuilder {
 }
 
 impl EngineBuilder {
-    /// Lets programs call `id` (`"<id>.<operation>"`), handled by `f`, which
-    /// returns its result directly.
+    /// Provides the external functions `<id>.<function>`, one for each of
+    /// `functions`, handled by `f`, which returns its result directly;
+    /// `call.op` says which function was called.
     ///
-    /// Executor ids can't contain a dot: a call splits at its first one.
+    /// `.executor("text", ["trim", "empty"], f)` provides `text.trim` and
+    /// `text.empty`, which a program may then declare in its `ext` (as
+    /// `{ "text": ["trim", "empty"] }`) and call. Executor ids can't contain a
+    /// dot, since a function's name splits at its first one; function names
+    /// can (`num.round.up` is executor `num`'s function `round.up`).
     /// Registering an id again replaces the earlier executor.
-    pub fn executor<F>(self, id: impl Into<String>, f: F) -> Self
+    pub fn executor<F>(
+        self,
+        id: impl Into<String>,
+        functions: impl IntoIterator<Item = impl Into<String>>,
+        f: F,
+    ) -> Self
     where
         F: Fn(ExecutorCall) -> ExecutorResult + Send + Sync + 'static,
     {
-        self.custom_executor(id, from_fn(f))
+        self.custom_executor(id, functions, from_fn(f))
     }
 
-    /// Lets programs call `id`, handled by `f`, which returns a future the run
-    /// awaits.
-    pub fn async_executor<F, Fut>(self, id: impl Into<String>, f: F) -> Self
+    /// Provides the external functions `<id>.<function>`, handled by `f`,
+    /// which returns a future the run awaits. See
+    /// [`executor`](EngineBuilder::executor).
+    pub fn async_executor<F, Fut>(
+        self,
+        id: impl Into<String>,
+        functions: impl IntoIterator<Item = impl Into<String>>,
+        f: F,
+    ) -> Self
     where
         F: Fn(ExecutorCall) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ExecutorResult> + Send + 'static,
     {
-        self.custom_executor(id, from_async_fn(f))
+        self.custom_executor(id, functions, from_async_fn(f))
     }
 
-    /// Lets programs call `id`, handled by any [`Executor`].
+    /// Provides the external functions `<id>.<function>`, handled by any
+    /// [`Executor`] (an `Arc<dyn Executor>` too). See
+    /// [`executor`](EngineBuilder::executor).
     pub fn custom_executor(
         mut self,
         id: impl Into<String>,
+        functions: impl IntoIterator<Item = impl Into<String>>,
         executor: impl Executor + 'static,
     ) -> Self {
-        self.executors.insert(id.into(), Arc::new(executor));
-        self
-    }
-
-    /// Adds executors by id.
-    pub fn executors<I, S>(mut self, executors: I) -> Self
-    where
-        I: IntoIterator<Item = (S, Arc<dyn Executor>)>,
-        S: Into<String>,
-    {
-        self.executors
-            .extend(executors.into_iter().map(|(id, e)| (id.into(), e)));
+        let registered = Registered {
+            functions: functions.into_iter().map(Into::into).collect(),
+            executor: Arc::new(executor),
+        };
+        self.executors.insert(id.into(), registered);
         self
     }
 
@@ -259,10 +297,8 @@ impl EngineBuilder {
 
 impl fmt::Debug for EngineBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut ids: Vec<&str> = self.executors.keys().map(String::as_str).collect();
-        ids.sort_unstable();
         f.debug_struct("EngineBuilder")
-            .field("executors", &ids)
+            .field("functions", &function_names(&self.executors))
             .field("limits", &self.limits)
             .finish()
     }
@@ -274,7 +310,7 @@ impl fmt::Debug for EngineBuilder {
 pub struct CompiledProgram {
     engine: Arc<Inner>,
     program: Value,
-    root: Input,
+    root: Program,
 }
 
 impl CompiledProgram {
@@ -286,13 +322,7 @@ impl CompiledProgram {
     /// Runs the program.
     pub async fn run(&self, options: RunOptions) -> Result<RunResult, Error> {
         let engine = &self.engine;
-        run::run(
-            &self.root,
-            &engine.executors,
-            engine.limits.max_steps,
-            options,
-        )
-        .await
+        run::run(&self.root, &engine.executors, engine.limits, options).await
     }
 
     /// [`run`](CompiledProgram::run), blocking the current thread until it

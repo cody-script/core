@@ -34,19 +34,21 @@ jobs:
             exit 1
           fi
 
-  # The library crates build on their MSRV, from a lockfile resolved to
-  # versions that support it. (Only check: the dev-dependencies need newer.)
+  # The whole workspace — every crate, test and doc test — on the oldest Rust
+  # it supports: `rust-version` in Cargo.toml, with the committed lockfile.
+  # (`check` above runs on the newest stable.)
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: dtolnay/rust-toolchain@1.77
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: echo "rust=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.rust }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo +stable generate-lockfile
-        env:
-          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
-      - run: cargo +1.77 check -p codyscript-core -p codyscript-json
+      - run: cargo test --locked --workspace
 
   # Single-threaded WebAssembly, in Node: the bindings, and the deepest
   # default-limit programs on WebAssembly's 1 MiB stack.

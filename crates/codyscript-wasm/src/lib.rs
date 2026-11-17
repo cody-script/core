@@ -1,12 +1,12 @@
 //! CodyScript in WebAssembly: JSON programs run from JavaScript, calling
-//! executors written in JavaScript.
+//! external functions written in JavaScript.
 //!
 //! ```js
 //! import init, { run } from "./pkg/codyscript_wasm.js";
 //! await init();
 //! const executors = {
-//!   text: ({ op, input }) => op === "trim" ? String(input.value ?? "").trim() : null,
-//!   slow: async ({ arg }) => { await new Promise((r) => setTimeout(r, 10)); return arg; },
+//!   text: { trim: ({ input }) => String(input.value ?? "").trim() },
+//!   slow: { echo: async ({ arg }) => { await new Promise((r) => setTimeout(r, 10)); return arg; } },
 //! };
 //! const outcome = JSON.parse(await run(programJson, '{"Name":" Ada "}', executors, '{"maxSteps":1000}'));
 //! // { ok: true, value, variables, steps }  or  { ok: false, error: { code, message, path, tag?, issues? } }
@@ -21,10 +21,11 @@ use codyscript_core::{
     RunResult, Value, Variables,
 };
 use codyscript_json::EngineJsonExt;
-use js_sys::{Array, Function, Object, Promise, JSON};
+use js_sys::{Array, Function, JSON, Object, Promise};
 use send_wrapper::SendWrapper;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -50,17 +51,19 @@ pub fn schema() -> String {
 ///
 /// - `program`: JSON text.
 /// - `variables`: JSON text of an object, or `""` for none.
-/// - `executors`: an object of functions, `{ id: (call) => value }`, or
-///   `null`. Each receives `{ op, arg?, input }` and returns a JSON value, or
-///   a promise of one; `undefined` is `null`, and throwing (or rejecting)
-///   fails the run with `executor_failed`.
+/// - `executors`: `{ id: { function: (call) => value, … }, … }`, or `null`:
+///   each executor an object of the external functions it provides, which
+///   programs declare in `ext` and call as `id.function`. A function
+///   receives `{ op, arg?, input }` (`op` is its own name) and returns a JSON
+///   value, or a promise of one; `undefined` is `null`, and throwing (or
+///   rejecting) fails the run with `function_failed`.
 /// - `limits`: JSON text like `{"maxSteps":1000,"maxDepth":64}`, or `""`.
 ///
 /// Resolves with JSON text: `{"ok":true,"value":…,"variables":…,"steps":…}`,
 /// or `{"ok":false,"error":{…}}` for any CodyScript error (including a
 /// program that isn't JSON). Rejects only when the arguments themselves are
-/// wrong: variables or limits that aren't JSON, or an executor that isn't a
-/// function.
+/// wrong: variables or limits that aren't JSON, an executor that isn't an
+/// object, or a function that isn't one.
 #[wasm_bindgen]
 pub async fn run(
     program: String,
@@ -85,7 +88,8 @@ fn parse_or_default<T: DeserializeOwned + Default>(json: &str, what: &str) -> Re
     codyscript_json::from_str(json).map_err(|e| JsError::new(&format!("{what}: {e}")))
 }
 
-/// An engine whose executors are the JavaScript functions in `executors`.
+/// An engine whose executors are the objects of JavaScript functions in
+/// `executors`.
 fn engine(executors: &JsValue, limits: Limits) -> Result<Engine, JsError> {
     let mut builder = Engine::builder().limits(limits);
     if executors.is_null() || executors.is_undefined() {
@@ -93,17 +97,36 @@ fn engine(executors: &JsValue, limits: Limits) -> Result<Engine, JsError> {
     }
     let executors: &Object = executors
         .dyn_ref()
-        .ok_or_else(|| JsError::new("executors: expected an object of functions"))?;
-    for entry in Object::entries(executors).iter() {
-        let entry: Array = entry.unchecked_into();
-        let id = entry.get(0).as_string().unwrap_or_default();
-        let function: Function = entry
-            .get(1)
-            .dyn_into()
-            .map_err(|_| JsError::new(&format!("executors: \"{id}\" isn't a function")))?;
-        builder = builder.custom_executor(id, JsExecutor(SendWrapper::new(function)));
+        .ok_or_else(|| JsError::new("executors: expected an object of executors"))?;
+    for (id, functions) in entries(executors) {
+        let functions: &Object = functions
+            .dyn_ref()
+            .filter(|_| !functions.is_function())
+            .ok_or_else(|| {
+                JsError::new(&format!("executors: \"{id}\" isn't an object of functions"))
+            })?;
+        let mut by_name = HashMap::new();
+        for (name, function) in entries(functions) {
+            let function: Function = function.dyn_into().map_err(|_| {
+                JsError::new(&format!("executors: \"{id}.{name}\" isn't a function"))
+            })?;
+            by_name.insert(name, function);
+        }
+        let names: Vec<String> = by_name.keys().cloned().collect();
+        builder = builder.custom_executor(id, names, JsExecutor(SendWrapper::new(by_name)));
     }
     Ok(builder.build())
+}
+
+/// An object's own enumerable entries, keyed by string.
+fn entries(object: &Object) -> Vec<(String, JsValue)> {
+    Object::entries(object)
+        .iter()
+        .map(|entry| {
+            let entry: Array = entry.unchecked_into();
+            (entry.get(0).as_string().unwrap_or_default(), entry.get(1))
+        })
+        .collect()
 }
 
 // ── Outcomes, as JSON ───────────────────────────────────────────────────────
@@ -136,15 +159,21 @@ fn outcome_json(outcome: &Result<RunResult, Error>) -> codyscript_json::serde_js
 
 // ── JavaScript executors ────────────────────────────────────────────────────
 
-/// A JavaScript function as an [`Executor`]. JavaScript values aren't
-/// `Send`; `SendWrapper` makes them so by checking, at runtime, that they
-/// never leave the thread that made them — which in browser WebAssembly,
-/// with its one thread, always holds.
-struct JsExecutor(SendWrapper<Function>);
+/// An object of JavaScript functions as an [`Executor`], calling the one
+/// named by the call's `op`. JavaScript values aren't `Send`; `SendWrapper`
+/// makes them so by checking, at runtime, that they never leave the thread
+/// that made them — which in browser WebAssembly, with its one thread,
+/// always holds.
+struct JsExecutor(SendWrapper<HashMap<String, Function>>);
 
 impl Executor for JsExecutor {
     fn call(&self, call: ExecutorCall) -> BoxFuture<'_, ExecutorResult> {
-        Box::pin(SendWrapper::new(call_js(&self.0, call)))
+        Box::pin(SendWrapper::new(async move {
+            // The engine only calls functions this executor was registered
+            // with: its object's keys.
+            let function = self.0.get(&call.op).ok_or("no such function")?;
+            call_js(function, call).await
+        }))
     }
 }
 

@@ -3,9 +3,9 @@
 
 mod common;
 
-use codyscript_core::{value, Engine, Error, ErrorCode, Limits, RunOptions, RunResult, Value};
+use codyscript_core::{Engine, Error, ErrorCode, Limits, RunOptions, RunResult, Value, value};
 use common::*;
-use serde_test::{assert_de_tokens, assert_ser_tokens, assert_tokens, Token};
+use serde_test::{Token, assert_de_tokens, assert_ser_tokens, assert_tokens};
 
 // ── Non-finite numbers: some formats (YAML, CBOR) can express them ─────────
 
@@ -22,18 +22,17 @@ fn refuses_numbers_that_arent_finite() {
         ),
         (
             "a non-finite arg",
-            op_with(
-                "math",
-                "add",
+            uses_math(call_with(
+                "math.add",
                 value!({}),
-                Some(Value::from(f64::NEG_INFINITY)),
-            ),
+                Value::from(f64::NEG_INFINITY),
+            )),
             "/arg",
         ),
         (
             "a non-finite argument",
-            op("math", "add", value!({ "a": nan })),
-            "/op/math.add/a",
+            uses_math(call("math.add", value!({ "a": nan }))),
+            "/call/math.add/a",
         ),
     ];
     for (name, program, path) in cases {
@@ -58,9 +57,11 @@ fn an_overflowing_literal_is_infinity_as_in_javascript() {
     let value = run(&Engine::new(), &program).unwrap().value;
     assert_eq!(value.as_f64(), Some(f64::NEG_INFINITY));
     let error = compile_error(&Engine::new(), &x(&format!("1 {huge}")));
-    assert!(error
-        .message()
-        .starts_with("Invalid program: Unexpected null in"));
+    assert!(
+        error
+            .message()
+            .starts_with("Invalid program: Unexpected null in")
+    );
 }
 
 // ── A non-JSON format, end to end ──────────────────────────────────────────
@@ -124,11 +125,32 @@ fn error_codes_are_their_snake_case_names() {
             variant: "step_limit",
         }],
     );
+    assert_tokens(
+        &ErrorCode::UnknownFunction,
+        &[Token::UnitVariant {
+            name: "ErrorCode",
+            variant: "unknown_function",
+        }],
+    );
+    assert_tokens(
+        &ErrorCode::FunctionFailed,
+        &[Token::UnitVariant {
+            name: "ErrorCode",
+            variant: "function_failed",
+        }],
+    );
+    assert_tokens(
+        &ErrorCode::DepthLimit,
+        &[Token::UnitVariant {
+            name: "ErrorCode",
+            variant: "depth_limit",
+        }],
+    );
 }
 
 #[test]
 fn an_error_serializes_for_an_editor() {
-    let error = compile_error(&engine(), &tagged(call("nope", "x"), "n7"));
+    let error = compile_error(&engine(), &tagged(call("nope", value!({})), "n7"));
     assert_ser_tokens(
         &error,
         &[
@@ -139,12 +161,12 @@ fn an_error_serializes_for_an_editor() {
             Token::Str("code"),
             Token::UnitVariant {
                 name: "ErrorCode",
-                variant: "unknown_executor",
+                variant: "invalid_program",
             },
             Token::Str("message"),
-            Token::Str(r#"Unknown executor "nope" at /op/nope.x (tag n7)"#),
+            Token::Str(r#"Invalid program: Unknown function "nope" at /call/nope (tag n7)"#),
             Token::Str("path"),
-            Token::Str("/op/nope.x"),
+            Token::Str("/call/nope"),
             Token::Str("tag"),
             Token::Str("n7"),
             Token::Str("issues"),
@@ -154,9 +176,9 @@ fn an_error_serializes_for_an_editor() {
                 len: 2,
             },
             Token::Str("path"),
-            Token::Str("/op/nope.x"),
+            Token::Str("/call/nope"),
             Token::Str("message"),
-            Token::Str(r#"Unknown executor "nope""#),
+            Token::Str(r#"Unknown function "nope""#),
             Token::StructEnd,
             Token::SeqEnd,
             Token::StructEnd,

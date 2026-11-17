@@ -1,4 +1,5 @@
-//! The host side: [`Executor`]s, what they're called with, and [`Signal`].
+//! The host side: [`Executor`]s, which provide a program's external
+//! functions, what they're called with, and [`Signal`].
 
 use std::fmt;
 use std::future::Future;
@@ -13,13 +14,15 @@ use crate::value::{Map, Value};
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// What an executor produces: a JSON value (`Value::Null` for nothing), or an
-/// error that fails the run with `executor_failed`.
+/// error that fails the run with `function_failed`.
 pub type ExecutorResult = Result<Value, BoxError>;
 
-/// What an executor is called with.
+/// What an executor is called with: one call of one of its functions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutorCall {
-    /// The operation: what follows the executor id in the call.
+    /// Which of the executor's functions: its name after the executor id
+    /// and the first dot (`trim` for `text.trim`, `round.up` for
+    /// `num.round.up`). Always one the executor was registered with.
     pub op: String,
     /// `arg` from the program, if any.
     pub arg: Option<Value>,
@@ -29,14 +32,16 @@ pub struct ExecutorCall {
     pub signal: Option<Signal>,
 }
 
-/// Host code a program may call.
+/// Host code that provides external functions: registered under an id
+/// (`text`) with the functions it provides (`trim`, `empty`), which programs
+/// declare in `ext` and call as `text.trim`, `text.empty`.
 ///
 /// Most hosts don't implement this directly: [`EngineBuilder::executor`]
 /// takes a plain closure and [`EngineBuilder::async_executor`] an async one.
 /// Implement it for executors that keep state and want to borrow it while
 /// they run.
 ///
-/// Returning an error fails the run with `executor_failed`, unless the error
+/// Returning an error fails the run with `function_failed`, unless the error
 /// is itself a boxed [`crate::Error`], which fails it unchanged.
 ///
 /// [`EngineBuilder::executor`]: crate::EngineBuilder::executor

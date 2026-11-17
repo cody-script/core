@@ -1,6 +1,6 @@
 // Checks a built package (build.sh's output; its directory is the argument)
 // the way a Node user would load it: initialised from the module's bytes,
-// then a run with a sync and an async executor, and a failing run.
+// then a run calling a sync and an async JavaScript function, and a failing run.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -15,10 +15,11 @@ assert.equal(version(), pkg.version);
 assert.equal(typeof JSON.parse(schema()), "object");
 
 const program = JSON.stringify({
+	ext: { text: ["trim", "empty"] },
 	do: [
-		{ set: { name: { op: { "text.trim": { value: { ref: "Name" } } } } } },
+		{ set: { name: { call: { "text.trim": { value: { ref: "Name" } } } } } },
 		{
-			if: { op: { "text.empty": { value: { ref: "name" } } } },
+			if: { call: { "text.empty": { value: { ref: "name" } } } },
 			do: [{ ret: { val: { error: "Name is required" } } }],
 			tag: "name-required",
 		},
@@ -26,10 +27,9 @@ const program = JSON.stringify({
 	],
 });
 const executors = {
-	text: async ({ op, input }) => {
-		if (op === "trim") return String(input.value ?? "").trim();
-		if (op === "empty") return input.value === "";
-		throw new Error(`unknown op ${op}`);
+	text: {
+		trim: ({ input }) => String(input.value ?? "").trim(),
+		empty: async ({ input }) => input.value === "",
 	},
 };
 

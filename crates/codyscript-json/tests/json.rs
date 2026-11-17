@@ -3,10 +3,10 @@
 #[path = "../../codyscript-core/tests/common/mod.rs"]
 mod common;
 
-use codyscript_core::{value, Engine, ErrorCode, Map, RunOptions, Value, Variables};
+use codyscript_core::{Engine, ErrorCode, Map, RunOptions, Value, Variables, value};
 use codyscript_json::{
-    from_reader, from_serde_json, from_slice, from_str, to_serde_json, to_string, to_string_pretty,
-    to_vec, to_writer, EngineJsonExt,
+    EngineJsonExt, from_reader, from_serde_json, from_slice, from_str, to_serde_json, to_string,
+    to_string_pretty, to_vec, to_writer,
 };
 use common::*;
 
@@ -65,11 +65,18 @@ fn results_and_errors_are_written_as_json() {
         r#"{"value":0.5,"variables":{"a":1},"steps":7}"#
     );
     let error = engine
-        .compile_json(r#"{ "op": { "nope.x": {} }, "tag": "n1" }"#)
+        .compile_json(r#"{ "call": { "nope.x": {} }, "tag": "n1" }"#)
         .unwrap_err();
     assert_eq!(
         to_string(&error).unwrap(),
-        r#"{"code":"unknown_executor","message":"Unknown executor \"nope\" at /op/nope.x (tag n1)","path":"/op/nope.x","tag":"n1","issues":[{"path":"/op/nope.x","message":"Unknown executor \"nope\""}]}"#
+        r#"{"code":"invalid_program","message":"Invalid program: Unknown function \"nope.x\" at /call/nope.x (tag n1)","path":"/call/nope.x","tag":"n1","issues":[{"path":"/call/nope.x","message":"Unknown function \"nope.x\""}]}"#
+    );
+    let error = engine
+        .compile_json(r#"{ "ext": { "nope": ["x"] }, "call": { "nope.x": {} } }"#)
+        .unwrap_err();
+    assert_eq!(
+        to_string(&error).unwrap(),
+        r#"{"code":"unknown_function","message":"Unknown function \"nope.x\" at /ext/nope/0","path":"/ext/nope/0","issues":[{"path":"/ext/nope/0","message":"Unknown function \"nope.x\""}]}"#
     );
 }
 
@@ -91,11 +98,13 @@ fn compile_json_compiles_and_reports_syntax_errors_as_invalid_programs() {
     );
     assert!(error.message().contains("line 1"));
     assert_eq!(error.issues().map(<[_]>::len), Some(1));
-    assert!(error
-        .cause()
-        .unwrap()
-        .downcast_ref::<serde_json::Error>()
-        .is_some());
+    assert!(
+        error
+            .cause()
+            .unwrap()
+            .downcast_ref::<serde_json::Error>()
+            .is_some()
+    );
 
     let error = engine.compile_json(r#"{ "x": "1 +" }"#).unwrap_err();
     assert_eq!(

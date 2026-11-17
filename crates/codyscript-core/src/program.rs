@@ -7,6 +7,16 @@ use std::sync::Arc;
 use crate::expression::Ast;
 use crate::value::Value;
 
+/// A whole program: the input that runs, and the CodyScript functions
+/// (`fn`) it may call. External functions (`ext`) need nothing here: a call
+/// to one names its executor.
+#[derive(Clone, Debug)]
+pub(crate) struct Program {
+    pub body: Input,
+    /// Every function's body, in the order written; calls hold an index.
+    pub functions: Vec<Input>,
+}
+
 /// Something that produces a value.
 #[derive(Clone, Debug)]
 pub(crate) struct Input {
@@ -23,8 +33,10 @@ pub(crate) enum InputKind {
     Ref(String),
     /// `x`: an expression.
     X(Expression),
-    /// `op`: a call to an executor.
-    Op(Operation),
+    /// `call` of an external function: the host's executor runs it.
+    External(External),
+    /// `call` of one of the program's own functions.
+    Call(Call),
     /// `do`: a block with its own scope.
     Do(Vec<Instruction>),
 }
@@ -38,14 +50,24 @@ pub(crate) struct Expression {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Operation {
-    /// The executor id: the call up to its first dot.
+pub(crate) struct External {
+    /// The executor id: the function's name up to its first dot.
     pub exe: String,
-    /// The operation: the call after its first dot.
+    /// The function's name within its executor: what follows the first dot
+    /// (`trim` in `text.trim`).
     pub op: String,
     /// The arguments to resolve, in order.
     pub args: Vec<(String, Input)>,
+    /// The static `arg`, passed as written.
     pub arg: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Call {
+    /// The function's index in [`Program::functions`].
+    pub function: usize,
+    /// The arguments to resolve, in order: the function's variables.
+    pub args: Vec<(String, Input)>,
 }
 
 /// Something that does something.

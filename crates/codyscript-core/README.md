@@ -1,9 +1,10 @@
 # codyscript-core
 
 The CodyScript interpreter: a small, sandboxed interpreter for programs
-written as data. The **host** decides what a program can do by handing it a
-set of **executors**; the **program** supplies the logic: variables,
-conditions, loops and calls to those executors. Nothing else is reachable.
+written as data. The **host** decides what a program can do by handing it
+**executors**, which provide named external functions; the **program**
+supplies the logic: variables, conditions, loops, functions of its own, and
+calls to those and to the host's. Nothing else is reachable.
 
 This crate is the whole interpreter and knows no data format: its only
 dependency is `serde`. Programs, variables and results are [`Value`]s, which
@@ -15,17 +16,20 @@ other format crate directly. In Rust code, write values with [`value!`].
 use codyscript_core::{value, Engine, RunOptions};
 
 let engine = Engine::builder()
-    .executor("text", |call| {
+    .executor("text", ["trim"], |call| {
         let text = call.input.get("value").and_then(|v| v.as_str()).unwrap_or("");
         Ok(text.trim().into())
     })
     .build();
 
-let rule = engine.compile(&value!({ "do": [
-    { "set": { "name": { "op": { "text.trim": { "value": { "ref": "Name" } } } } } },
-    { "if": { "x": "name == ''" }, "do": [{ "ret": { "val": { "error": "Name is required" } } }] },
-    { "ret": { "ref": "name" } }
-] })).unwrap();
+let rule = engine.compile(&value!({
+    "ext": { "text": ["trim"] },
+    "do": [
+        { "set": { "name": { "call": { "text.trim": { "value": { "ref": "Name" } } } } } },
+        { "if": { "x": "name == ''" }, "do": [{ "ret": { "val": { "error": "Name is required" } } }] },
+        { "ret": { "ref": "name" } }
+    ]
+})).unwrap();
 
 let row = value!({ "Name": "  Ada " }).into_object().unwrap();
 let result = rule.run_blocking(RunOptions::from(row)).unwrap();
@@ -47,8 +51,13 @@ error rather than ignored.
 **Where a node sits decides what it is.** In an input position, an object or
 list is always a node — only numbers, strings, booleans and `null` stand for
 themselves — so a constant object is wrapped in `val`, and nothing inside
-`val` is read as a node. An input has exactly one of `ref`, `val`, `x`, `op`,
-`do`; an instruction exactly one of `set`, `ret`, `if`, `for`.
+`val` is read as a node. An input has exactly one of `val`, `ref`, `x`,
+`call`, `do`; an instruction exactly one of `set`, `ret`, `if`, `for`.
+
+**A program is an input** — usually a block — and what it produces is the
+run's value. Its root node may also carry two fields, and only it: `fn`,
+the functions the program defines in CodyScript, and `ext`, the external
+functions it uses from the host ([Functions](#functions)).
 
 ### Inputs — produce a value
 
@@ -58,15 +67,15 @@ themselves — so a constant object is wrapped in `val`, and nothing inside
 | `val` | `{ "val": <any> }` | Any value; needed only for objects and lists. |
 | `ref` | `{ "ref": "name" }` | The variable. Undefined → `undefined_variable` error. |
 | `x` | `{ "x": "amount * 0.03" }` | An expression over variables (below). |
-| `op` | `{ "op": { "text.trim": { <arg>: <input>, … } }, "arg"?: <any> }` | Calls an executor (below). |
+| `call` | `{ "call": { "text.trim": { <arg>: <input>, … } }, "arg"?: <any> }` | Calls a [function](#functions); its value is what the function returns. |
 | `do` | `{ "do": [<instruction>…] }` | A block: runs in a new scope; its value is what it `ret`urns, else `null`. |
 
-**Calls.** `op` has exactly one key, `"<executor>.<operation>"`, split at the
-first dot: `{ "op": { "text.trim": { "value": … } } }` calls executor `text`
-with an `ExecutorCall { op: "trim", input: { "value": <resolved> }, arg }`. A
-call with no arguments is `{ "op": { "clock.now": {} } }`. `arg` is a static
-argument, passed as written. Executor ids can't contain a dot; operation
-names can (`"num.round.up"` is operation `round.up`).
+**Calls.** `call` has exactly one key, the function's name, whose value
+names its arguments: `{ "call": { "text.trim": { "value": … } } }`, or
+`{ "call": { "clock.now": {} } }` with none. The arguments are resolved one
+at a time, in the order written, before the function runs. A call looks the
+same whichever kind of function it calls; `arg`, a static argument passed
+as written, is only for external ones.
 
 ### Instructions — do something
 
@@ -90,7 +99,8 @@ implement the same way, in a fraction of the bytes:
 | Logic | `&&` and `\|\|` short-circuit and return an operand, as in JavaScript (`discount \|\| 0`); `!` |
 
 Precedence, loosest first: `||`, `&&`, comparisons, `+ -`, `* /`, unary.
-There are no function calls: text, dates and everything else are executors.
+Expressions don't call functions: for text, dates and everything else, use
+`call`.
 
 Expressions are parsed when the program is compiled, so a syntax error is an
 `invalid_program` at that node's `/x`. Running one never re-parses it, never
@@ -101,15 +111,79 @@ by zero is a `type_error` naming the operator and the expression.
 A fuller example — a 3% fee on a CSV `Amount`, capped at 300:
 
 ```jsonc
-{ "do": [
-  { "set": { "amount": { "op": { "num.parse": { "value": { "ref": "Amount" } } } } } },
-  { "if": { "x": "amount < 0" },
-    "do": [{ "ret": { "val": { "error": "Amount must be positive" } } }] },
-  { "set": { "fee": { "x": "amount * 0.03" } } },
-  { "if": { "x": "fee > 300" }, "do": [{ "set": { "fee": 300 } }] },
-  { "ret": { "ref": "fee" } }
+{ "ext": { "num": ["parse"] },
+  "do": [
+    { "set": { "amount": { "call": { "num.parse": { "value": { "ref": "Amount" } } } } } },
+    { "if": { "x": "amount < 0" },
+      "do": [{ "ret": { "val": { "error": "Amount must be positive" } } }] },
+    { "set": { "fee": { "x": "amount * 0.03" } } },
+    { "if": { "x": "fee > 300" }, "do": [{ "set": { "fee": 300 } }] },
+    { "ret": { "ref": "fee" } }
 ] }
 ```
+
+### Functions
+
+Everything a program calls is a function, of one of two kinds, side by
+side at the program's root:
+
+- **External functions** are the host's, provided by its executors. A
+  program declares the ones it uses in `ext`, by executor:
+  `"ext": { "text": ["trim", "empty"] }` declares `text.trim` and
+  `text.empty`. Like Rust's `extern`, the list is the program's whole reach
+  outside the sandbox, and it's checked against the host when the program
+  is compiled: a function the host doesn't provide is an
+  `unknown_function`.
+- **CodyScript functions** are the program's own, defined in `fn` by name.
+  Each is a CodyScript program itself — any input, usually a block.
+
+```json
+{
+  "ext": { "text": ["trim", "empty"] },
+  "fn": {
+    "fee": {
+      "do": [
+        { "set": { "fee": { "x": "amount * rate" } } },
+        { "if": { "x": "fee > 300" }, "do": [{ "ret": 300 }] },
+        { "ret": { "ref": "fee" } }
+      ]
+    }
+  },
+  "do": [
+    { "set": { "name": { "call": { "text.trim": { "value": { "ref": "Name" } } } } } },
+    { "if": { "call": { "text.empty": { "value": { "ref": "name" } } } },
+      "do": [{ "ret": { "val": { "error": "Name is required" } } }] },
+    { "ret": { "call": { "fee": { "amount": { "ref": "Amount" }, "rate": 0.03 } } } }
+  ]
+}
+```
+
+- **The program runs as it always has**: its input is where the run starts,
+  with the host's variables, in the root scope, so its top-level assignments
+  come back as `variables`. Defining and declaring functions changes nothing
+  until they're called.
+- **A CodyScript function sees only its arguments.** They are its
+  variables, in a fresh scope: it can't read its caller's variables or the
+  host's — pass what it needs — and its own assignments end with it. Like a
+  program, its value is what it `ret`urns (`null` if it doesn't); a `ret`
+  ends the function, and the caller carries on. Its top-level block isn't a
+  step of its own; the `call` is one.
+- **CodyScript functions may call each other and themselves**, in any order
+  of definition. Calls may be in progress at most `max_depth` deep (default
+  128): one more fails the run with `depth_limit`, so endless recursion stops
+  even when steps are to spare. For long repetition, use `for`.
+- **Names.** An external function's name is its executor's id, a dot, and
+  its name within the executor (`text.trim`; `num.round.up` is executor
+  `num`'s `round.up`), so executor ids can't contain a dot. A CodyScript
+  function may have any non-empty name, dots included, so functions can be
+  grouped by prefix (`text.size`, `pricing.fee`) — even beside an executor of
+  the same name, as long as no name is both defined in `fn` and declared in
+  `ext`.
+- **Checked when compiled**: every `call` must name a function the program
+  defines or declares; a name can't be in both; only external calls take
+  `arg`; names are non-empty and an `ext` list names each function once —
+  any of these is an `invalid_program`, at the node. Errors inside a
+  function point into it (`/fn/fee/do/1/if`).
 
 ### Semantics
 
@@ -126,7 +200,8 @@ A fuller example — a 3% fee on a CSV `Amount`, capped at 300:
 - **Scope**: a nested block reads its enclosing variables, but `set` inside it
   assigns its own — nothing leaks out, and its `ret` returns only from it. A
   top-level block runs in the root scope, so its assignments are returned as
-  `variables`.
+  `variables`. A function's scope starts with its arguments and reads nothing
+  outside it.
 - **Order**: objects keep their keys in the order they were written (a data
   format reads them in document order). A call's arguments are resolved one
   at a time, in that order; `variables` come back in the order they were
@@ -156,11 +231,13 @@ them in programs.
 ```text
 Engine::new() -> Engine                                   // no executors
 Engine::builder()
-    .executor(id, |call| -> ExecutorResult)               // sync closure
-    .async_executor(id, |call| async move { … })          // async closure
-    .custom_executor(id, impl Executor)                   // your own type
+    .executor(id, ["fn", …], |call| -> ExecutorResult)    // sync closure
+    .async_executor(id, ["fn", …], |call| async move { … }) // async closure
+    .custom_executor(id, ["fn", …], impl Executor)        // your own type
     .max_steps(n).max_depth(n)                            // or .limits(Limits)
     .build() -> Engine
+
+engine.has_function("text.trim") -> bool
 
 engine.compile(&program) -> Result<CompiledProgram, Error>
 engine.run(&program, options).await -> Result<RunResult, Error>   // compile + run
@@ -172,9 +249,14 @@ RunOptions::new().with_variables(map).with_signal(signal)  // or RunOptions::fro
 RunResult { value: Value, variables: Map, steps: u64 }
 ```
 
-- **Executors** receive an `ExecutorCall { op, arg, input, signal }` and return
+- **Executors** provide external functions, and are registered with the
+  ones they provide: `.executor("text", ["trim", "empty"], f)` provides
+  `text.trim` and `text.empty`, and `compile` checks every function a
+  program declares in `ext` against that list. A call of one reaches the
+  executor as an `ExecutorCall { op, arg, input, signal }` — `op` is which
+  of its functions (`"trim"`) — and it returns
   `Result<Value, BoxError>` (`Value::Null` for nothing), directly or from a
-  `Send` future. `BoxError` converts from any error and from strings, so `?`
+  `Send` future. Registering an id again replaces its executor and its list. `BoxError` converts from any error and from strings, so `?`
   and `Err("…".into())` work. Each engine owns its executors; there is no
   global registry. `Engine` is cheap to clone, and `Engine` and
   `CompiledProgram` are `Send + Sync`, so one compiled program can serve
@@ -187,16 +269,18 @@ RunResult { value: Value, variables: Map, steps: u64 }
 - **Limits** — `max_steps` (default 100 000) bounds the work a run may do, so
   an endless `for` fails with `step_limit` instead of hanging a worker;
   `max_depth` (default 128) bounds nesting, in the program and in an
-  expression (see the safety model for what raising it costs).
+  expression (see the safety model for what raising it costs), and how
+  deeply function calls nest while running (`depth_limit`).
 - **Cancellation** — pass a `Signal` in `RunOptions`; `signal.abort()` (or
   `abort_with(reason)`) from anywhere stops the run at its next step with
   `aborted`, and executors receive the signal to stop their own work.
 - **Errors** — every failure is a `codyscript_core::Error` with a `code()`
-  (`InvalidProgram`, `UnknownExecutor`, `UndefinedVariable`, `TypeError`,
-  `ExecutorFailed`, `StepLimit`, `Aborted` — `code().as_str()` gives
-  `"invalid_program"` and so on), a JSON Pointer `path()` into the program,
-  the node's `tag()`, a `cause()` (an executor's error, an abort reason) and,
-  for `InvalidProgram` / `UnknownExecutor`, every `issues()` found. An
+  (`InvalidProgram`, `UnknownFunction`, `UndefinedVariable`, `TypeError`,
+  `FunctionFailed`, `StepLimit`, `DepthLimit`, `Aborted` — `code().as_str()`
+  gives `"invalid_program"` and so on), a JSON Pointer `path()` into the
+  program, the node's `tag()`, a `cause()` (an executor's error, an abort
+  reason) and, for `InvalidProgram` / `UnknownFunction`, every `issues()`
+  found. An
   executor that returns a boxed `codyscript_core::Error` fails the run with
   exactly that error.
 - **Isolation** — `compile` copies the program, so later changes to the
@@ -208,17 +292,20 @@ An async executor, a run with variables, and an error:
 use codyscript_core::{value, Engine, ErrorCode, RunOptions, Value};
 
 let engine = Engine::builder()
-    .async_executor("db", |call| async move {
+    .async_executor("db", ["get"], |call| async move {
         // e.g. look something up; here, echo the argument back
         Ok(call.input.get("id").cloned().unwrap_or(Value::Null))
     })
     .max_steps(1_000)
     .build();
 
-let program = value!({ "do": [
-    { "set": { "row": { "op": { "db.get": { "id": { "x": "n + 1" } } } } } },
-    { "ret": { "x": "row * 10" } }
-] });
+let program = value!({
+    "ext": { "db": ["get"] },
+    "do": [
+        { "set": { "row": { "call": { "db.get": { "id": { "x": "n + 1" } } } } } },
+        { "ret": { "x": "row * 10" } }
+    ]
+});
 let options = RunOptions::from(value!({ "n": 4 }).into_object().unwrap());
 let result = engine.run_blocking(&program, options).unwrap();
 assert_eq!(result.value, 50);
@@ -232,16 +319,20 @@ assert_eq!(error.to_string(), r#"Variable "n" is not defined in "n * 2" at /x"#)
 
 ## Safety model
 
-A program can only call the executors it was given, and only the operations
-those executors accept: **an executor is the whole attack surface**, so treat
-its inputs as untrusted. The engine refuses malformed or over-deep programs
+A program can only call the external functions it declares, and only those
+its host's executors provide: **the executors are the whole attack
+surface**, so treat their inputs as untrusted. A program's `ext` lists
+everything it can reach outside the sandbox, so a host can read it before
+running anything. The engine refuses malformed or over-deep programs
 before running them, bounds every run by steps, and never evaluates strings
 as code: expressions are parsed by a small hand-written parser into a tree
 the engine walks itself.
 
 No program can overflow the stack. Running one doesn't recurse at all: the
-engine is a loop over explicit stacks, however deep the program; nor does
-evaluating or dropping an expression, however long. Only compiling recurses,
+engine is a loop over explicit stacks, however deep the program, and a
+function call is an entry on those stacks, however deep the recursion; nor
+does evaluating or dropping an expression, however long. Recursion can't
+grow memory without bound either: calls nest at most `max_depth` deep. Only compiling recurses,
 once per nesting level, so `max_depth` — which the host sets and no program
 can exceed — bounds it. At the default of 128, compiling and running the
 deepest allowed program needs under 512 KiB of stack in a native debug build
@@ -255,12 +346,19 @@ the run, as panics do.
 
 ## Differences from the TypeScript package
 
-Programs, error codes, messages and paths are the same; the differences are
-in the host API and in what JavaScript can and Rust can't express:
+This crate's 0.6 is ahead of the TypeScript package's 0.5: **its program
+format ([functions](#functions): `fn`, `ext` and `call` in place of `op`)
+and error codes (`unknown_function`, `function_failed`, `depth_limit`) are
+Rust-only** until the TypeScript package adopts them. A program that calls
+no functions runs the same in both, with the same messages and paths —
+except that an input-shape error lists `"call"` where 0.5 lists `"op"`.
+The other differences are in the host API and in what JavaScript can and
+Rust can't express:
 
 - Executors return `Result<Value, BoxError>` rather than returning or
-  throwing; there's no `undefined` (return `Value::Null`). Register them on
-  `Engine::builder()` rather than passing an object or `Map`.
+  throwing; there's no `undefined` (return `Value::Null`). Register them,
+  with their functions, on `Engine::builder()` rather than passing an object
+  or `Map`.
 - `Signal` replaces `AbortSignal`: one cloneable handle that is both
   controller and signal. Its reason is any error (or string).
 - `compile` takes a `Value`, so the checks for values no data format can
@@ -282,6 +380,40 @@ in the host API and in what JavaScript can and Rust can't express:
 
 The program format is shared with the TypeScript package, so its history
 applies.
+
+### 0.5 → 0.6 (format change; needs Rust 1.99)
+
+No rules were stored in the 0.5 format, so 0.6 reads only the new one.
+Everything a program calls is now a [function](#functions): the host's
+external functions, which a program declares in `ext`, and functions of its
+own, which it defines in `fn`. Both are called with `call`, which replaces
+`op`:
+
+| 0.5 | 0.6 |
+|---|---|
+| `{ "op": { "text.trim": M } }` | `{ "call": { "text.trim": M } }`, and `"text": ["trim"]` in the root's `ext` |
+| `{ "op": { "text.trim": M }, "arg": A }` | `{ "call": { "text.trim": M }, "arg": A }`, declared the same way |
+| `{ "do": [ … ] }` calling `text.trim` and `text.empty` | `{ "ext": { "text": ["trim", "empty"] }, "do": [ … ] }` |
+| error path `…/op/text.trim/value` | `…/call/text.trim/value` |
+| `unknown_executor`, at the call (`…/op/nope.x`) | `unknown_function`, at the declaration (`/ext/nope/0`); an undeclared call is an `invalid_program` at `…/call/nope.x` |
+| `executor_failed`: `Executor "text" failed on "trim": …` | `function_failed`: `Function "text.trim" failed: …` |
+
+- **Calls check more.** A call must name a function the program declares
+  or defines, and each declared function must be one the host provides —
+  not just any operation of a known executor.
+- **Hosts list their functions** when registering an executor:
+  `.executor("text", ["trim", "empty"], f)` (and the same for
+  `async_executor` and `custom_executor`). `EngineBuilder::executors` is
+  gone (register an `Arc<dyn Executor>` with `custom_executor`), and
+  `Engine::has_executor("text")` is `Engine::has_function("text.trim")`.
+  In JavaScript, an executor is an object of its functions (see
+  `codyscript-wasm`).
+- **Error codes**: `ErrorCode::UnknownExecutor` is `UnknownFunction`
+  (`"unknown_function"`), `ExecutorFailed` is `FunctionFailed`
+  (`"function_failed"`), and `DepthLimit` (`"depth_limit"`) is new.
+- **Messages**: an input-shape error lists `"val", "ref", "x", "call", "do"`.
+- **Rust**: the crates use edition 2024 and need Rust 1.99 or newer (0.5
+  needed 1.77).
 
 ### 0.3 → 0.4 (additive)
 

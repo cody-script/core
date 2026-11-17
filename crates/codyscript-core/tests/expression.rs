@@ -1,7 +1,7 @@
 mod common;
 
-use codyscript_core::{value, Value};
 use codyscript_core::{Engine, Error, ErrorCode, RunOptions};
+use codyscript_core::{Value, value};
 use common::*;
 
 fn eval(source: &str, variables: Value) -> Result<Value, Error> {
@@ -98,11 +98,13 @@ fn and_and_or_return_an_operand() {
 fn a_number_passed_through_keeps_its_exact_json_form() {
     let big = value!(u64::MAX);
     assert_eq!(eval("n || 0", value!({ "n": big.clone() })).unwrap(), big);
-    assert!(eval("n", value!({ "n": 1.0 }))
-        .unwrap()
-        .as_number()
-        .unwrap()
-        .is_f64());
+    assert!(
+        eval("n", value!({ "n": 1.0 }))
+            .unwrap()
+            .as_number()
+            .unwrap()
+            .is_f64()
+    );
 }
 
 #[test]
@@ -243,16 +245,22 @@ fn refuses_bad_syntax_at_compile_time() {
 #[test]
 fn refuses_nesting_past_max_depth_parentheses_or_operators() {
     let parens = format!("{}1{}", "(".repeat(200), ")".repeat(200));
-    assert!(compile_error_at(&parens, None)
-        .message()
-        .contains("Expression nests deeper than 128 levels"));
+    assert!(
+        compile_error_at(&parens, None)
+            .message()
+            .contains("Expression nests deeper than 128 levels")
+    );
     let nots = format!("{}a", "!".repeat(200));
-    assert!(compile_error_at(&nots, None)
-        .message()
-        .contains("nests deeper"));
-    assert!(compile_error_at("((1))", Some(2))
-        .message()
-        .contains("nests deeper than 2"));
+    assert!(
+        compile_error_at(&nots, None)
+            .message()
+            .contains("nests deeper")
+    );
+    assert!(
+        compile_error_at("((1))", Some(2))
+            .message()
+            .contains("nests deeper than 2")
+    );
 }
 
 #[test]

@@ -12,12 +12,12 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
-use codyscript_bench::alloc::{bytes, measure, report, Counting};
+use codyscript_bench::alloc::{Counting, bytes, measure, report};
 use codyscript_bench::{self as scenario, memory_scenarios};
 use codyscript_core::CompiledProgram;
 use js_sys::{Function, Object, Reflect};
 use wasm_bindgen::JsValue;
-use wasm_bindgen_test::{wasm_bindgen_bench, Criterion};
+use wasm_bindgen_test::{Criterion, wasm_bindgen_bench};
 
 #[global_allocator]
 static ALLOC: Counting = Counting;
@@ -68,6 +68,10 @@ fn run(c: &mut Criterion) {
     let calls = scenario::compile(&engine, &scenario::call_loop());
     c.bench_function("run/call_loop/1000", |b| {
         b.iter(|| calls.run_blocking(scenario::options(scenario::n(1_000))))
+    });
+    let functions = scenario::compile(&engine, &scenario::function_loop());
+    c.bench_function("run/function_loop/1000", |b| {
+        b.iter(|| functions.run_blocking(scenario::options(scenario::n(1_000))))
     });
 }
 
@@ -211,12 +215,9 @@ fn call_loop(engine: &codyscript_core::Engine) -> Arc<CompiledProgram> {
 
 /// `{ math: (call) => { <body> } }`.
 fn math_in_javascript(body: &str) -> JsValue {
+    let math = Object::new();
+    Reflect::set(&math, &"add".into(), &Function::new_with_args("call", body)).unwrap();
     let executors = Object::new();
-    Reflect::set(
-        &executors,
-        &"math".into(),
-        &Function::new_with_args("call", body),
-    )
-    .unwrap();
+    Reflect::set(&executors, &"math".into(), &math).unwrap();
     executors.into()
 }

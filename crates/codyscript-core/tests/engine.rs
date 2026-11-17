@@ -2,10 +2,10 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use codyscript_core::{value, Value};
 use codyscript_core::{
     Engine, Error, ErrorCode, Executor, ExecutorCall, Limits, RunOptions, Signal,
 };
+use codyscript_core::{Value, value};
 use common::*;
 
 mod inputs {
@@ -70,18 +70,18 @@ mod inputs {
 
     #[test]
     fn literals_work_anywhere_an_input_does() {
-        let program = m(vec![
+        let program = uses_math(m(vec![
             set("i", value!(0)),
             lp(
-                op("math", "lt", value!({ "a": var("i"), "b": 3 })),
+                call("math.lt", value!({ "a": var("i"), "b": 3 })),
                 vec![set(
                     "i",
-                    op("math", "add", value!({ "a": var("i"), "b": 1 })),
+                    call("math.add", value!({ "a": var("i"), "b": 1 })),
                 )],
             ),
             when(value!(false), vec![ret(value!("no"))], None),
             ret(var("i")),
-        ]);
+        ]));
         assert_eq!(run(&engine(), &program).unwrap().value, value!(3));
     }
 
@@ -97,15 +97,16 @@ mod inputs {
     }
 }
 
-mod operations {
+mod external_functions {
     use super::*;
 
-    /// An executor that records its calls and returns `result`.
+    /// An executor providing `exe.doIt` and `exe.x` that records its calls
+    /// and returns `result`.
     fn recorder(result: Value) -> (Arc<Mutex<Vec<ExecutorCall>>>, Engine) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&calls);
         let engine = Engine::builder()
-            .executor("exe", move |call| {
+            .executor("exe", ["doIt", "x"], move |call| {
                 log.lock().unwrap().push(call);
                 Ok(result.clone())
             })
@@ -113,15 +114,19 @@ mod operations {
         (calls, engine)
     }
 
+    /// `program`, declaring `exe.doIt` and `exe.x`.
+    fn uses_exe(program: Value) -> Value {
+        with_ext(program, value!({ "exe": ["doIt", "x"] }))
+    }
+
     #[test]
-    fn call_the_executor_with_op_arg_and_resolved_input() {
+    fn call_the_executor_with_the_functions_name_arg_and_resolved_input() {
         let (calls, engine) = recorder(value!("ok"));
-        let program = op_with(
-            "exe",
-            "doIt",
+        let program = uses_exe(call_with(
+            "exe.doIt",
             value!({ "a": val(value!(1)), "b": var("x") }),
-            Some(value!({ "cfg": true })),
-        );
+            value!({ "cfg": true }),
+        ));
         let result = engine.run_blocking(&program, with_vars(value!({ "x": "y" })));
         assert_eq!(result.unwrap().value, value!("ok"));
         assert_eq!(
@@ -138,7 +143,7 @@ mod operations {
     #[test]
     fn pass_empty_input_and_no_arg_when_the_program_has_none() {
         let (calls, engine) = recorder(value!(1));
-        run(&engine, &call("exe", "x")).unwrap();
+        run(&engine, &uses_exe(call("exe.x", value!({})))).unwrap();
         assert_eq!(
             *calls.lock().unwrap(),
             vec![ExecutorCall {
@@ -153,27 +158,47 @@ mod operations {
     #[test]
     fn an_explicit_null_arg_is_passed_on() {
         let (calls, engine) = recorder(value!(1));
-        run(&engine, &op_with("exe", "x", value!({}), Some(Value::Null))).unwrap();
+        run(
+            &engine,
+            &uses_exe(call_with("exe.x", value!({}), Value::Null)),
+        )
+        .unwrap();
         assert_eq!(calls.lock().unwrap()[0].arg, Some(Value::Null));
+    }
+
+    #[test]
+    fn a_function_name_with_dots_splits_at_the_first() {
+        let engine = Engine::builder()
+            .executor("num", ["round.up"], |call| Ok(call.op.into()))
+            .build();
+        let program = with_ext(
+            call("num.round.up", value!({})),
+            value!({ "num": ["round.up"] }),
+        );
+        assert_eq!(run(&engine, &program).unwrap().value, value!("round.up"));
+        assert!(engine.has_function("num.round.up"));
+        assert!(!engine.has_function("num.round"));
     }
 
     #[test]
     fn null_from_an_executor_is_null() {
         let engine = Engine::builder()
-            .executor("exe", |_| Ok(Value::Null))
+            .executor("exe", ["x"], |_| Ok(Value::Null))
             .build();
-        assert_eq!(run(&engine, &call("exe", "x")).unwrap().value, Value::Null);
+        let program = with_ext(call("exe.x", value!({})), value!({ "exe": ["x"] }));
+        assert_eq!(run(&engine, &program).unwrap().value, Value::Null);
     }
 
     #[test]
     fn async_executors_are_awaited() {
         let engine = Engine::builder()
-            .async_executor("exe", |_| async {
+            .async_executor("exe", ["x"], |_| async {
                 sleep(5).await;
                 Ok(value!(5))
             })
             .build();
-        assert_eq!(run(&engine, &call("exe", "x")).unwrap().value, value!(5));
+        let program = with_ext(call("exe.x", value!({})), value!({ "exe": ["x"] }));
+        assert_eq!(run(&engine, &program).unwrap().value, value!(5));
     }
 
     #[test]
@@ -181,7 +206,7 @@ mod operations {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
         let slow_log = Arc::clone(&log);
         let engine = Engine::builder()
-            .async_executor("slow", move |call| {
+            .async_executor("slow", ["x"], move |call| {
                 let log = Arc::clone(&slow_log);
                 async move {
                     let arg = call.arg.unwrap_or_default();
@@ -192,15 +217,17 @@ mod operations {
                     Ok(arg)
                 }
             })
-            .executor("pair", |call| Ok(Value::Object(call.input)))
+            .executor("pair", ["x"], |call| Ok(Value::Object(call.input)))
             .build();
-        let program = op(
-            "pair",
-            "x",
-            value!({
-                "first": op_with("slow", "x", value!({}), Some(value!("a"))),
-                "second": op_with("slow", "x", value!({}), Some(value!("b"))),
-            }),
+        let program = with_ext(
+            call(
+                "pair.x",
+                value!({
+                    "first": call_with("slow.x", value!({}), value!("a")),
+                    "second": call_with("slow.x", value!({}), value!("b")),
+                }),
+            ),
+            value!({ "pair": ["x"], "slow": ["x"] }),
         );
         let result = run(&engine, &program).unwrap();
         assert_eq!(*log.lock().unwrap(), ["a", "b"]);
@@ -210,9 +237,12 @@ mod operations {
     #[test]
     fn arguments_keep_their_written_order() {
         let engine = Engine::builder()
-            .executor("pair", |call| Ok(Value::Object(call.input)))
+            .executor("pair", ["x"], |call| Ok(Value::Object(call.input)))
             .build();
-        let program = value!({ "op": { "pair.x": { "z": 1, "a": 2, "m": 3 } } });
+        let program = value!({
+            "ext": { "pair": ["x"] },
+            "call": { "pair.x": { "z": 1, "a": 2, "m": 3 } }
+        });
         let value = run(&engine, &program).unwrap().value;
         assert_eq!(keys(&value), ["z", "a", "m"]);
     }
@@ -229,28 +259,44 @@ mod operations {
     #[test]
     fn an_executors_error_fails_the_run_with_its_path_and_cause() {
         let engine = Engine::builder()
-            .executor("bad", |_| Err(Box::new(Boom)))
+            .executor("bad", ["go"], |_| Err(Box::new(Boom)))
             .build();
-        let program = m(vec![set("x", tagged(call("bad", "go"), "n1"))]);
+        let program = with_ext(
+            m(vec![set("x", tagged(call("bad.go", value!({})), "n1"))]),
+            value!({ "bad": ["go"] }),
+        );
         let error = failure(run(&engine, &program));
-        assert_eq!(error.code(), ErrorCode::ExecutorFailed);
+        assert_eq!(error.code(), ErrorCode::FunctionFailed);
+        assert_eq!(error.code().as_str(), "function_failed");
         assert_eq!(error.path(), "/do/0/set/x");
         assert_eq!(error.tag(), Some("n1"));
         assert!(error.cause().unwrap().downcast_ref::<Boom>().is_some());
         assert!(std::error::Error::source(&error).is_some());
         assert_eq!(
             error.message(),
-            r#"Executor "bad" failed on "go": boom at /do/0/set/x (tag n1)"#
+            r#"Function "bad.go" failed: boom at /do/0/set/x (tag n1)"#
         );
     }
 
     #[test]
     fn a_string_error_is_reported_too() {
         let engine = Engine::builder()
-            .async_executor("bad", |_| async { Err("nope".into()) })
+            .async_executor("bad", ["go"], |_| async { Err("nope".into()) })
             .build();
-        let error = failure(run(&engine, &call("bad", "go")));
-        assert!(error.message().contains(": nope"), "{}", error.message());
+        let program = with_ext(call("bad.go", value!({})), value!({ "bad": ["go"] }));
+        let error = failure(run(&engine, &program));
+        assert_eq!(error.message(), r#"Function "bad.go" failed: nope"#);
+    }
+
+    #[test]
+    fn registering_an_id_again_replaces_the_executor_and_its_functions() {
+        let engine = Engine::builder()
+            .executor("exe", ["old"], |_| Ok(value!("old")))
+            .executor("exe", ["new"], |_| Ok(value!("new")))
+            .build();
+        assert!(!engine.has_function("exe.old"));
+        let program = with_ext(call("exe.new", value!({})), value!({ "exe": ["new"] }));
+        assert_eq!(run(&engine, &program).unwrap().value, value!("new"));
     }
 }
 
@@ -359,21 +405,17 @@ mod instructions {
 
     #[test]
     fn for_loops_while_its_condition_holds() {
-        let program = m(vec![
+        let program = uses_math(m(vec![
             set("i", val(value!(0))),
             lp(
-                op("math", "lt", value!({ "a": var("i"), "b": val(value!(5)) })),
+                call("math.lt", value!({ "a": var("i"), "b": val(value!(5)) })),
                 vec![set(
                     "i",
-                    op(
-                        "math",
-                        "add",
-                        value!({ "a": var("i"), "b": val(value!(1)) }),
-                    ),
+                    call("math.add", value!({ "a": var("i"), "b": val(value!(1)) })),
                 )],
             ),
             ret(var("i")),
-        ]);
+        ]));
         assert_eq!(run(&engine(), &program).unwrap().value, value!(5));
     }
 
@@ -429,22 +471,504 @@ mod blocks {
     }
 }
 
+mod functions {
+    use super::*;
+
+    /// A program whose body calls `fee`, which caps a 3% fee.
+    fn fee_program() -> Value {
+        with_fn(
+            m(vec![
+                set("fee", call("fee", value!({ "amount": var("Amount") }))),
+                ret(var("fee")),
+            ]),
+            [(
+                "fee",
+                m(vec![
+                    set("fee", x("amount * 0.03")),
+                    when(x("fee > 300"), vec![ret(value!(300))], None),
+                    ret(var("fee")),
+                ]),
+            )],
+        )
+    }
+
+    #[test]
+    fn a_programs_body_runs_and_calls_its_functions() {
+        let engine = engine();
+        let compiled = engine.compile(&fee_program()).unwrap();
+        let result = compiled
+            .run_blocking(with_vars(value!({ "Amount": 1000 })))
+            .unwrap();
+        assert_eq!(result.value, value!(30));
+        // The body's variables are the result's; the function's `fee` isn't.
+        assert_eq!(
+            result.variables,
+            vars(value!({ "Amount": 1000, "fee": 30 }))
+        );
+        assert_eq!(
+            compiled_value(&compiled, with_vars(value!({ "Amount": 20000 }))),
+            value!(300)
+        );
+    }
+
+    #[test]
+    fn the_roots_fields_may_come_in_any_order() {
+        let before = value!({ "fn": { "two": 2 }, "call": { "two": {} } });
+        let after = value!({ "call": { "two": {} }, "fn": { "two": 2 } });
+        for program in [before, after] {
+            assert_eq!(run(&engine(), &program).unwrap().value, value!(2));
+        }
+    }
+
+    #[test]
+    fn defining_and_declaring_functions_changes_nothing_until_they_are_called() {
+        let engine = engine();
+        let programs = [
+            x("n * 2"),
+            val(value!({ "a": [1] })),
+            m(vec![]),
+            m(vec![set("a", value!(1)), set("b", x("a + n"))]),
+            m(vec![
+                set("i", value!(0)),
+                lp(x("i < n"), vec![set("i", x("i + 1"))]),
+                ret(m(vec![ret(var("i"))])),
+            ]),
+        ];
+        for program in programs {
+            let alone = engine
+                .run_blocking(&program, with_vars(value!({ "n": 4 })))
+                .unwrap();
+            let beside = with_fn(uses_math(program.clone()), [("f", value!(1))]);
+            let beside = engine
+                .run_blocking(&beside, with_vars(value!({ "n": 4 })))
+                .unwrap();
+            assert_eq!(alone, beside, "{program:?}");
+        }
+    }
+
+    #[test]
+    fn arguments_are_a_functions_only_variables() {
+        let engine = engine();
+        let reads = |name: &str| {
+            with_fn(
+                m(vec![
+                    set("local", value!(1)),
+                    ret(call("f", value!({ "arg": 2 }))),
+                ]),
+                [("f", var(name))],
+            )
+        };
+        let options = || with_vars(value!({ "host": 3 }));
+        let result = engine.run_blocking(&reads("arg"), options()).unwrap();
+        assert_eq!(result.value, value!(2));
+        for hidden in ["local", "host"] {
+            let error = failure(engine.run_blocking(&reads(hidden), options()));
+            assert_eq!(error.code(), ErrorCode::UndefinedVariable, "{hidden}");
+            assert_eq!(error.path(), "/fn/f");
+        }
+        // Expressions see the same variables as `ref`.
+        let program = with_fn(
+            m(vec![set("a", value!(1)), ret(call("f", value!({})))]),
+            [("f", x("a"))],
+        );
+        let error = failure(run(&engine, &program));
+        assert_eq!(error.code(), ErrorCode::UndefinedVariable);
+        assert_eq!(
+            error.message(),
+            r#"Variable "a" is not defined in "a" at /fn/f/x"#
+        );
+    }
+
+    #[test]
+    fn a_functions_assignments_stay_in_it_and_the_callers_are_visible_again() {
+        let program = with_fn(
+            m(vec![
+                set("a", value!(1)),
+                set("r", call("f", value!({ "a": 5 }))),
+                ret(x("a * 100 + r")),
+            ]),
+            [(
+                "f",
+                m(vec![
+                    set("a", x("a + 1")),
+                    set("b", value!(9)),
+                    ret(var("a")),
+                ]),
+            )],
+        );
+        let result = run(&engine(), &program).unwrap();
+        assert_eq!(result.value, value!(106));
+        assert_eq!(result.variables, vars(value!({ "a": 1, "r": 6 })));
+    }
+
+    #[test]
+    fn ret_returns_from_the_function_and_the_caller_carries_on() {
+        let program = with_fn(
+            m(vec![
+                set("a", call("first", value!({}))),
+                set("b", value!("after")),
+                ret(value!("end")),
+            ]),
+            [(
+                "first",
+                m(vec![
+                    lp(
+                        value!(true),
+                        vec![when(value!(true), vec![ret(value!(1))], None)],
+                    ),
+                    ret(value!("never")),
+                ]),
+            )],
+        );
+        let result = run(&engine(), &program).unwrap();
+        assert_eq!(result.value, value!("end"));
+        assert_eq!(result.variables, vars(value!({ "a": 1, "b": "after" })));
+    }
+
+    #[test]
+    fn a_function_with_no_ret_returns_null() {
+        let program = with_fn(call("f", value!({})), [("f", m(vec![set("a", value!(1))]))]);
+        assert_eq!(run(&engine(), &program).unwrap().value, Value::Null);
+    }
+
+    #[test]
+    fn arguments_resolve_in_order_before_the_call_and_may_be_calls() {
+        let log = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen = Arc::clone(&log);
+        let engine = Engine::builder()
+            .executor("log", ["x"], move |call| {
+                seen.lock()
+                    .unwrap()
+                    .push(call.arg.clone().unwrap_or_default());
+                Ok(call.arg.unwrap_or_default())
+            })
+            .build();
+        let logged = |v: Value| call_with("log.x", value!({}), v);
+        let program = with_ext(
+            with_fn(
+                call(
+                    "pair",
+                    value!({
+                        "z": logged(value!("z")),
+                        "a": call("pair", value!({ "z": logged(value!("inner")), "a": 0 })),
+                    }),
+                ),
+                [(
+                    "pair",
+                    m(vec![ret(logged(value!("body"))), ret(var("never"))]),
+                )],
+            ),
+            value!({ "log": ["x"] }),
+        );
+        let value = run(&engine, &program).unwrap().value;
+        assert_eq!(value, value!("body"));
+        assert_eq!(
+            *log.lock().unwrap(),
+            [value!("z"), value!("inner"), value!("body"), value!("body")]
+        );
+        let program = with_fn(
+            call("sub", value!({ "z": 10, "a": 3 })),
+            [("sub", x("z - a"))],
+        );
+        assert_eq!(run(&engine, &program).unwrap().value, value!(7));
+    }
+
+    #[test]
+    fn functions_and_external_functions_call_each_other() {
+        // A namespaced CodyScript function beside the executor's functions,
+        // each calling the other kind.
+        let program = with_fn(
+            uses_math(call("math.double", value!({ "a": 20 }))),
+            [
+                (
+                    "math.double",
+                    call(
+                        "math.add",
+                        value!({ "a": var("a"), "b": call("math.one", value!({})) }),
+                    ),
+                ),
+                (
+                    "math.one",
+                    call("math.add", value!({ "a": var("a"), "b": 1 })),
+                ),
+            ],
+        );
+        // math.one sees no `a`: arguments are its only variables.
+        let error = failure(run(&engine(), &program));
+        assert_eq!(error.path(), "/fn/math.one/call/math.add/a");
+        let program = with_fn(
+            uses_math(call("math.double", value!({ "a": 20 }))),
+            [
+                (
+                    "math.double",
+                    call(
+                        "math.add",
+                        value!({ "a": var("a"), "b": call("math.one", value!({ "a": var("a") })) }),
+                    ),
+                ),
+                (
+                    "math.one",
+                    call("math.add", value!({ "a": var("a"), "b": 1 })),
+                ),
+            ],
+        );
+        assert_eq!(run(&engine(), &program).unwrap().value, value!(41));
+    }
+
+    #[test]
+    fn functions_may_call_each_other_and_themselves() {
+        let program = with_fn(m(vec![ret(val(value!([])))]), [("unused", value!(0))]);
+        assert_eq!(run(&engine(), &program).unwrap().value, value!([]));
+
+        let factorial = with_fn(
+            call("factorial", value!({ "n": var("n") })),
+            [(
+                "factorial",
+                m(vec![
+                    when(x("n <= 1"), vec![ret(value!(1))], None),
+                    ret(x("n * r")),
+                ]),
+            )],
+        );
+        // `r` isn't set: a recursive call has to be made explicitly.
+        let error = failure(engine().run_blocking(&factorial, with_vars(value!({ "n": 3 }))));
+        assert_eq!(error.path(), "/fn/factorial/do/1/ret/x");
+
+        let factorial = with_fn(
+            call("factorial", value!({ "n": var("n") })),
+            [(
+                "factorial",
+                m(vec![
+                    when(x("n <= 1"), vec![ret(value!(1))], None),
+                    set("r", call("factorial", value!({ "n": x("n - 1") }))),
+                    ret(x("n * r")),
+                ]),
+            )],
+        );
+        let compiled = engine().compile(&factorial).unwrap();
+        assert_eq!(
+            compiled_value(&compiled, with_vars(value!({ "n": 1 }))),
+            value!(1)
+        );
+        assert_eq!(
+            compiled_value(&compiled, with_vars(value!({ "n": 10 }))),
+            value!(3_628_800)
+        );
+
+        let parity = with_fn(
+            call("even", value!({ "n": var("n") })),
+            [
+                (
+                    "even",
+                    m(vec![
+                        when(x("n == 0"), vec![ret(value!(true))], None),
+                        ret(call("odd", value!({ "n": x("n - 1") }))),
+                    ]),
+                ),
+                (
+                    "odd",
+                    m(vec![
+                        when(x("n == 0"), vec![ret(value!(false))], None),
+                        ret(call("even", value!({ "n": x("n - 1") }))),
+                    ]),
+                ),
+            ],
+        );
+        let compiled = engine().compile(&parity).unwrap();
+        assert_eq!(
+            compiled_value(&compiled, with_vars(value!({ "n": 7 }))),
+            value!(false)
+        );
+        assert_eq!(
+            compiled_value(&compiled, with_vars(value!({ "n": 10 }))),
+            value!(true)
+        );
+    }
+
+    fn endless() -> Value {
+        with_fn(
+            call("spin", value!({ "n": 0 })),
+            [(
+                "spin",
+                tagged(call("spin", value!({ "n": x("n + 1") })), "again"),
+            )],
+        )
+    }
+
+    #[test]
+    fn endless_recursion_stops_at_max_depth() {
+        let error = failure(run(&engine(), &endless()));
+        assert_eq!(error.code(), ErrorCode::DepthLimit);
+        assert_eq!(error.code().as_str(), "depth_limit");
+        assert_eq!(error.path(), "/fn/spin");
+        assert_eq!(error.tag(), Some("again"));
+        assert_eq!(
+            error.message(),
+            "Calls nest deeper than 128 levels at /fn/spin (tag again)"
+        );
+        // Recursion isn't unbounded by steps alone: with steps to spare,
+        // depth still stops it.
+        let engine = Engine::builder().max_steps(u64::MAX).build();
+        assert_eq!(
+            failure(run(&engine, &endless())).code(),
+            ErrorCode::DepthLimit
+        );
+    }
+
+    #[test]
+    fn max_depth_calls_may_nest_and_no_more() {
+        let countdown = with_fn(
+            call("down", value!({ "n": var("n") })),
+            [(
+                "down",
+                m(vec![
+                    when(
+                        x("n > 0"),
+                        vec![ret(call("down", value!({ "n": x("n - 1") })))],
+                        None,
+                    ),
+                    ret(value!("bottom")),
+                ]),
+            )],
+        );
+        let engine = Engine::builder().max_depth(16).build();
+        let compiled = engine.compile(&countdown).unwrap();
+        // n = 15: sixteen calls in progress at once, the body's to down(15)
+        // through down(1)'s to down(0).
+        assert_eq!(
+            compiled_value(&compiled, with_vars(value!({ "n": 15 }))),
+            value!("bottom")
+        );
+        let error = failure(compiled.run_blocking(with_vars(value!({ "n": 16 }))));
+        assert_eq!(error.code(), ErrorCode::DepthLimit);
+        assert_eq!(error.path(), "/fn/down/do/0/do/0/ret");
+        // The depth is of calls in progress, not of calls made: a thousand
+        // calls one after another are fine.
+        let program = with_fn(
+            m(vec![
+                set("i", value!(0)),
+                lp(
+                    x("i < 1000"),
+                    vec![set("i", call("next", value!({ "i": var("i") })))],
+                ),
+                ret(var("i")),
+            ]),
+            [("next", x("i + 1"))],
+        );
+        assert_eq!(run(&engine, &program).unwrap().value, value!(1000));
+    }
+
+    #[test]
+    fn calls_of_external_functions_dont_count_towards_max_depth() {
+        let engine = Engine::builder()
+            .executor("id", ["x"], |call| Ok(call.input["v"].clone()))
+            .max_depth(12)
+            .build();
+        let mut nested = value!(1);
+        for _ in 0..3 {
+            nested = call("id.x", obj([("v", nested)]));
+        }
+        let program = with_ext(nested, value!({ "id": ["x"] }));
+        assert_eq!(run(&engine, &program).unwrap().value, value!(1));
+    }
+
+    #[test]
+    fn a_call_is_a_step_and_a_functions_top_level_block_isnt() {
+        // call (1) + its argument (1) + ret (1) + the ref (1)
+        let program = with_fn(
+            call("f", value!({ "a": 1 })),
+            [("f", m(vec![ret(var("a"))]))],
+        );
+        assert_eq!(run(&engine(), &program).unwrap().steps, 4);
+        // A nested block is a step, as it is anywhere.
+        let program = with_fn(call("f", value!({})), [("f", m(vec![ret(m(vec![]))]))]);
+        assert_eq!(run(&engine(), &program).unwrap().steps, 3);
+        // An external call is one step, plus its arguments.
+        let program = uses_math(call("math.add", value!({ "a": 1, "b": 2 })));
+        assert_eq!(run(&engine(), &program).unwrap().steps, 3);
+        // Steps are counted across calls: recursion hits the step limit.
+        let engine = Engine::builder().max_steps(20).build();
+        let error = failure(run(&engine, &endless()));
+        assert_eq!(error.code(), ErrorCode::StepLimit);
+    }
+
+    #[test]
+    fn errors_inside_a_function_point_into_it() {
+        let engine = Engine::builder()
+            .executor("bad", ["go"], |_| Err("boom".into()))
+            .build();
+        let program = with_ext(
+            with_fn(
+                m(vec![set("x", call("f", value!({}))), ret(value!(1))]),
+                [("f", m(vec![ret(tagged(call("bad.go", value!({})), "n2"))]))],
+            ),
+            value!({ "bad": ["go"] }),
+        );
+        let error = failure(run(&engine, &program));
+        assert_eq!(error.code(), ErrorCode::FunctionFailed);
+        assert_eq!(error.path(), "/fn/f/do/0/ret");
+        assert_eq!(
+            error.message(),
+            r#"Function "bad.go" failed: boom at /fn/f/do/0/ret (tag n2)"#
+        );
+        let program = with_fn(call("f", value!({ "a": 1 })), [("f", x("a + 'b'"))]);
+        let error = failure(run(&engine, &program));
+        assert_eq!(error.code(), ErrorCode::TypeError);
+        assert_eq!(error.path(), "/fn/f/x");
+    }
+
+    #[test]
+    fn a_signal_stops_a_run_inside_a_function() {
+        let signal = Signal::new();
+        let stopper = signal.clone();
+        let engine = Engine::builder()
+            .executor("stop", ["x"], move |_| {
+                stopper.abort();
+                Ok(value!(1))
+            })
+            .build();
+        let program = with_ext(
+            with_fn(
+                call("f", value!({})),
+                [(
+                    "f",
+                    m(vec![set("a", call("stop.x", value!({}))), ret(var("a"))]),
+                )],
+            ),
+            value!({ "stop": ["x"] }),
+        );
+        let error = failure(engine.run_blocking(&program, RunOptions::new().with_signal(signal)));
+        assert_eq!(error.code(), ErrorCode::Aborted);
+        assert_eq!(error.path(), "/fn/f/do/1");
+    }
+
+    #[test]
+    fn a_compiled_program_with_functions_runs_again_with_fresh_state() {
+        let compiled = engine().compile(&fee_program()).unwrap();
+        let failed = compiled.run_blocking(RunOptions::new());
+        assert_eq!(failure(failed).code(), ErrorCode::UndefinedVariable);
+        for _ in 0..3 {
+            let result = compiled
+                .run_blocking(with_vars(value!({ "Amount": 100 })))
+                .unwrap();
+            assert_eq!(result.value, value!(3));
+            assert_eq!(result.variables, vars(value!({ "Amount": 100, "fee": 3 })));
+        }
+    }
+}
+
 mod compile {
     use super::*;
 
     #[test]
     fn a_compiled_program_runs_many_times_with_fresh_state() {
-        let source = m(vec![
+        let source = uses_math(m(vec![
             set(
                 "x",
-                op(
-                    "math",
-                    "add",
-                    value!({ "a": var("n"), "b": val(value!(1)) }),
-                ),
+                call("math.add", value!({ "a": var("n"), "b": val(value!(1)) })),
             ),
             ret(var("x")),
-        ]);
+        ]));
         let compiled = engine().compile(&source).unwrap();
         assert_eq!(
             compiled_value(&compiled, with_vars(value!({ "n": 1 }))),
@@ -473,19 +997,25 @@ mod compile {
     #[test]
     fn engines_dont_share_executors() {
         let _other = Engine::builder()
-            .executor("other", |_| Ok(value!(1)))
+            .executor("other", ["x"], |_| Ok(value!(1)))
             .build();
-        let error = compile_error(&engine(), &call("other", "x"));
-        assert_eq!(error.code(), ErrorCode::UnknownExecutor);
+        let program = with_ext(call("other.x", value!({})), value!({ "other": ["x"] }));
+        let error = compile_error(&engine(), &program);
+        assert_eq!(error.code(), ErrorCode::UnknownFunction);
+        assert_eq!(error.path(), "/ext/other/0");
     }
 
     #[test]
-    fn executors_may_be_given_as_a_collection() {
+    fn a_shared_executor_may_be_registered_as_an_arc() {
         let one: Arc<dyn Executor> =
             Arc::new(codyscript_core::executor::from_fn(|_| Ok(value!(1))));
-        let engine = Engine::builder().executors([("one", one)]).build();
-        assert!(engine.has_executor("one"));
-        assert_eq!(run(&engine, &call("one", "x")).unwrap().value, value!(1));
+        let engine = Engine::builder()
+            .custom_executor("one", ["x"], Arc::clone(&one))
+            .custom_executor("uno", ["x"], one)
+            .build();
+        assert!(engine.has_function("one.x") && engine.has_function("uno.x"));
+        let program = with_ext(call("uno.x", value!({})), value!({ "uno": ["x"] }));
+        assert_eq!(run(&engine, &program).unwrap().value, value!(1));
     }
 
     #[test]
@@ -504,9 +1034,13 @@ mod compile {
             }
         }
         let engine = Engine::builder()
-            .custom_executor("count", Counter(Mutex::new(0)))
+            .custom_executor("count", ["next"], Counter(Mutex::new(0)))
             .build();
-        let program = m(vec![set("a", call("count", "x")), ret(call("count", "x"))]);
+        let next = || call("count.next", value!({}));
+        let program = with_ext(
+            m(vec![set("a", next()), ret(next())]),
+            value!({ "count": ["next"] }),
+        );
         assert_eq!(run(&engine, &program).unwrap().value, value!(2));
     }
 
@@ -585,14 +1119,17 @@ mod limits {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
         let engine = Engine::builder()
-            .executor("stop", move |call| {
+            .executor("stop", ["x"], move |call| {
                 let signal = call.signal.expect("the run's signal");
                 signal.abort_with("enough");
                 log.lock().unwrap().push(signal);
                 Ok(value!(true))
             })
             .build();
-        let program = m(vec![lp(call("stop", "x"), vec![])]);
+        let program = with_ext(
+            m(vec![lp(call("stop.x", value!({})), vec![])]),
+            value!({ "stop": ["x"] }),
+        );
         let error =
             failure(engine.run_blocking(&program, RunOptions::new().with_signal(signal.clone())));
         assert_eq!(*seen.lock().unwrap(), vec![signal.clone()]);
@@ -623,11 +1160,12 @@ mod limits {
     #[test]
     fn an_executors_own_error_passes_through_unwrapped() {
         let engine = Engine::builder()
-            .executor("x", |_| {
+            .executor("x", ["y"], |_| {
                 Err(Box::new(Error::new(ErrorCode::Aborted, "stop")))
             })
             .build();
-        let error = failure(run(&engine, &call("x", "y")));
+        let program = with_ext(call("x.y", value!({})), value!({ "x": ["y"] }));
+        let error = failure(run(&engine, &program));
         assert_eq!(error.code(), ErrorCode::Aborted);
         assert_eq!(error.message(), "stop");
         assert_eq!(error.path(), "");
@@ -668,9 +1206,51 @@ mod stack {
 
             let mut calls = value!(1);
             for _ in 0..42 {
-                calls = op("math", "add", value!({ "a": calls, "b": 1 }));
+                calls = call("math.add", value!({ "a": calls, "b": 1 }));
             }
+            let calls = uses_math(calls);
             assert_eq!(run(&engine(), &calls).unwrap().value, value!(43));
+
+            // Calls nest on the machine's own stacks, not the thread's.
+            let countdown = with_fn(
+                call("down", value!({ "n": 127 })),
+                [(
+                    "down",
+                    m(vec![
+                        when(
+                            x("n > 0"),
+                            vec![ret(call("down", value!({ "n": x("n - 1") })))],
+                            None,
+                        ),
+                        ret(var("n")),
+                    ]),
+                )],
+            );
+            assert_eq!(run(&engine(), &countdown).unwrap().value, value!(0));
+        });
+    }
+
+    #[test]
+    fn deep_recursion_doesnt_use_the_threads_stack() {
+        on_small_stack(|| {
+            let engine = Engine::builder()
+                .max_depth(100_000)
+                .max_steps(10_000_000)
+                .build();
+            // 100 000 calls in progress at once: the body's to sum(99 999)
+            // through sum(1)'s to sum(0).
+            let sum = with_fn(
+                call("sum", value!({ "n": 99_999 })),
+                [(
+                    "sum",
+                    m(vec![
+                        when(x("n == 0"), vec![ret(value!(0))], None),
+                        set("rest", call("sum", value!({ "n": x("n - 1") }))),
+                        ret(x("n + rest")),
+                    ]),
+                )],
+            );
+            assert_eq!(run(&engine, &sum).unwrap().value, value!(4_999_950_000_u64));
         });
     }
 }

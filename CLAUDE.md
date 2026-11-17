@@ -1,9 +1,13 @@
 # CodyScript for Rust
 
 The **CodyScript interpreter**, as a Cargo workspace: programs are data, the
-host supplies executors, and nothing else is reachable. A port of the
-TypeScript package `@cody-script/core` 0.5 (in `../corezip`): same program
-format, semantics, error codes, paths and messages.
+host supplies executors (which provide named external functions), and
+nothing else is reachable. A port of the TypeScript package
+`@cody-script/core` 0.5 (in `../corezip`) — but 0.6 changes the program
+format ahead of it: every call is a `call` of a function, declared in the
+root's `ext` (the host's) or defined in its `fn` (CodyScript's); `op` is
+gone; codes `unknown_function`, `function_failed`, `depth_limit`. Listed in
+the core README's differences and upgrade notes.
 README.md is the overview; each crate's README is its rustdoc front page
 (the core's is the language reference). This file is the working guide.
 
@@ -15,6 +19,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo tree -p codyscript-core -e normal                 # must show serde only
+cargo +1.99 test --locked --workspace                   # on the MSRV, as CI does
 
 # WebAssembly: once, `rustup target add wasm32-unknown-unknown` and
 # `cargo install wasm-bindgen-cli --version 0.2.130` (= the wasm-bindgen crate)
@@ -37,12 +42,17 @@ crates/
                      #   and its serde impls (serde_impls.rs) — the only
                      #   place the core meets data formats
       engine.rs      # Engine, EngineBuilder, CompiledProgram (the public API)
-      run.rs         # The interpreter: one loop over explicit stacks
+      run.rs         # The interpreter: one loop over explicit stacks;
+                     #   a function call is a frame on them, not recursion
       validate.rs    # One walk: shape, finite numbers, depth, reserved keys,
-                     #   executor ids, expression syntax; builds the tree
-      program.rs     # The validated program tree (crate-private)
+                     #   root-only `fn`/`ext`, what each call names, the
+                     #   host's functions, expression syntax; builds the tree
+      program.rs     # The validated program tree (crate-private): a
+                     #   Program is its body and its `fn` functions; a call
+                     #   is resolved to an External or a function index
       expression.rs  # The `x` language: tokenizer, parser, evaluator
       executor.rs    # Executor trait, ExecutorCall, Signal, closure adapters
+                     #   (engine.rs registers each with its function names)
       error.rs       # Error, ErrorCode, Issue, Details
     tests/
       common/mod.rs  # Builders, the `math` executor, valid/invalid fixtures
@@ -56,7 +66,8 @@ crates/
     tests/           # json.rs (conventions), schema.rs, readme.rs
   codyscript-wasm/   # WebAssembly bindings (wasm-bindgen); not published.
     src/lib.rs       # run(program, variables, executors, limits) for JavaScript;
-                     #   JavaScript executors via send_wrapper
+                     #   executors are objects of JavaScript functions
+                     #   ({ text: { trim } }), bridged via send_wrapper
     tests/web.rs     # wasm-bindgen-test: Node by default, browsers too
     npm/             # the npm package @cody-script/core-wasm: build.sh,
                      #   package.json template, README, smoke.mjs (Node)
@@ -86,9 +97,19 @@ to an adapter. JSON-specific things (the schema, `serde_json` errors and
 interop, recursion limits) live in `codyscript-json`.
 
 Other constraints: no async runtime dependency (`run` is a plain future;
-`run_blocking` uses a std-only `block_on`); `#![forbid(unsafe_code)]`;
-MSRV 1.77 (check with `cargo +1.77` on a lockfile resolved with
-`CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`).
+`run_blocking` uses a std-only `block_on`); `#![forbid(unsafe_code)]`.
+
+**Toolchain: one Rust for everything.** Edition 2024, and `rust-version` in
+`Cargo.toml` (1.99) is the one MSRV for every crate, its tests, benchmarks
+and tools — CI's `msrv` job reads it from there and runs the whole suite on
+it with the committed lockfile. Use current Rust freely (let chains,
+`pop_if`, lint `reason`s, …); when you need something newer, raise
+`rust-version` (and note it in the core README's upgrade notes) rather than
+working around it. Resolver 3 keeps `cargo update` to dependency versions
+that support it. Not yet possible on stable, so don't try: executors as
+`AsyncFn` closures that capture state (`async move |call| …`) — a `Send`
+bound on their future needs unstable features; non-capturing `async |call|`
+closures already work with `async_executor`.
 
 ## Rules
 
@@ -105,6 +126,17 @@ MSRV 1.77 (check with `cargo +1.77` on a lockfile resolved with
   descended. Don't add recursion over anything a program controls.
   `tests/engine.rs` runs the deepest default-limit programs on a 1 MiB
   stack (WebAssembly's), and `codyscript-wasm` checks it under wasm32.
+- **Everything called is a function.** The root node — any input — may
+  carry `fn` (CodyScript functions, each a program itself) and `ext` (the
+  host's functions it uses, by executor: `{ "text": ["trim"] }`); both
+  only there. `call` calls either; a name is in one or the other, never
+  both; only external calls take `arg`. Hosts register each executor with
+  the functions it provides, so `compile` checks `ext` exactly
+  (`unknown_function`) — keep that: a program's `ext` is its whole reach
+  outside the sandbox. A CodyScript call runs in a fresh scope holding only
+  its arguments (`Machine::base` stops reads falling through to the
+  caller's); nesting is bounded by `max_depth` at run time (`depth_limit`),
+  which also bounds the memory recursion can take.
 - **Browser WebAssembly is single-threaded and JavaScript values aren't
   `Send`.** Bridge them in `codyscript-wasm` (`send_wrapper`), never by
   loosening the core's `Send` bounds.

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use codyscript_bench::alloc::{measure, report, Counting, Usage};
+use codyscript_bench::alloc::{Counting, Usage, measure, report};
 use codyscript_bench::{self as scenario, memory_scenarios};
 
 #[global_allocator]

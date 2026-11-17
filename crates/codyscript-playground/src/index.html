@@ -35,15 +35,18 @@ import init, { run, version } from "/pkg/codyscript_wasm.js";
 
 const $ = (id) => document.getElementById(id);
 
-// The demo executors programs can call; see cases.rs. A fresh set per run,
-// so `order` starts again.
+// The demo executors: the external functions programs can declare and call;
+// see cases.rs. A fresh set per run, so `order` starts again.
 function executors() {
   let order = 0;
   return {
-    text: ({ op, input }) => (op === "trim" ? String(input.value ?? "").trim() : String(input.value ?? "") === ""),
-    slow: async ({ arg }) => { await new Promise((done) => setTimeout(done, arg.ms)); return { id: arg.id, order: ++order }; },
-    pair: ({ input }) => input,
-    fail: ({ op, arg }) => { if (op === "reject") return Promise.reject(arg); throw new Error(arg); },
+    text: {
+      trim: ({ input }) => String(input.value ?? "").trim(),
+      empty: ({ input }) => String(input.value ?? "") === "",
+    },
+    slow: { wait: async ({ arg }) => { await new Promise((done) => setTimeout(done, arg.ms)); return { id: arg.id, order: ++order }; } },
+    pair: { x: ({ input }) => input },
+    fail: { throw: ({ arg }) => { throw new Error(arg); }, reject: ({ arg }) => Promise.reject(arg) },
   };
 }
 

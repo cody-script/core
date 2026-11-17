@@ -183,9 +183,9 @@ impl<'de> Deserialize<'de> for Number {
 
 #[cfg(test)]
 mod tests {
-    use serde::de::value::{I128Deserializer, MapDeserializer, U128Deserializer};
     use serde::de::IntoDeserializer;
-    use serde_test::{assert_de_tokens, assert_tokens, Token};
+    use serde::de::value::{I128Deserializer, MapDeserializer, U128Deserializer};
+    use serde_test::{Token, assert_de_tokens, assert_tokens};
 
     use super::*;
     use crate::value;

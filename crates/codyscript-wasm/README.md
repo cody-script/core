@@ -1,7 +1,7 @@
 # codyscript-wasm
 
 CodyScript compiled to WebAssembly: run JSON programs from JavaScript, in a
-browser or Node, with executors written in JavaScript — plain functions or
+browser or Node, with external functions written in JavaScript — plain or
 `async` ones.
 
 ```js
@@ -9,9 +9,11 @@ import init, { run } from "./pkg/codyscript_wasm.js";
 await init();
 
 const executors = {
-  text: ({ op, input }) => (op === "trim" ? String(input.value ?? "").trim() : null),
-  lookup: async ({ input }) => (await fetch(`/api/${input.id}`)).json(),
+  text: { trim: ({ input }) => String(input.value ?? "").trim() },
+  api: { lookup: async ({ input }) => (await fetch(`/api/${input.id}`)).json() },
 };
+// A program declares what it uses: { "ext": { "text": ["trim"] }, … },
+// and calls it: { "call": { "text.trim": { "value": { "ref": "Name" } } } }.
 const outcome = JSON.parse(await run(programJson, '{"Name":"  Ada "}', executors, '{"maxSteps":10000}'));
 if (outcome.ok) console.log(outcome.value, outcome.variables, outcome.steps);
 else console.error(outcome.error.code, outcome.error.message, outcome.error.path);
@@ -25,14 +27,14 @@ else console.error(outcome.error.code, outcome.error.message, outcome.error.path
 |---|---|
 | `program` | JSON text. |
 | `variables` | JSON text of an object, or `""`. |
-| `executors` | `{ id: (call) => value }` or `null`. A call is `{ op, arg?, input }`; return a JSON value or a promise of one. `undefined` is `null`; throwing or rejecting fails the run with `executor_failed`. |
+| `executors` | `{ id: { name: (call) => value, … }, … }` or `null`: each executor an object of the external functions it provides, which a program declares in `ext` (`{ "text": ["trim"] }`) and calls as `text.trim`. A call is `{ op, arg?, input }` (`op` is the function's own name); return a JSON value or a promise of one. `undefined` is `null`; throwing or rejecting fails the run with `function_failed`. |
 | `limits` | JSON text like `{"maxSteps":10000,"maxDepth":64}`, or `""`. |
 
 It resolves with JSON text, `{"ok":true,"value":…,"variables":…,"steps":…}`
 or `{"ok":false,"error":{"code":…,"message":…,"path":…,"tag"?:…,"issues"?:…}}`
 for any CodyScript error, including a program that isn't JSON. It rejects
 only when the arguments are wrong (variables or limits that aren't JSON, an
-executor that isn't a function). Also exported: `version()` and `schema()`
+executor that isn't an object of functions). Also exported: `version()` and `schema()`
 (the JSON Schema, as text).
 
 ## Building
@@ -62,8 +64,9 @@ dependencies never become this one's.
 ## Tests
 
 `tests/web.rs` runs CodyScript, compiled to WebAssembly, in a JavaScript
-engine — through these bindings (JavaScript executors, sync, async and
-throwing; the event loop driving a run; JSON in and out) and through the core
+engine — through these bindings (JavaScript functions, sync, async and
+throwing, and calls between them and CodyScript functions; the event loop
+driving a run; JSON in and out) and through the core
 directly (the blocking runner, signals), plus stack-depth checks under
 WebAssembly's 1 MiB stack.
 
