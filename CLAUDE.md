@@ -65,9 +65,10 @@ crates/
     schema.json      # JSON Schema for hand-writing programs
     tests/           # json.rs (conventions), schema.rs, readme.rs
   codyscript-wasm/   # WebAssembly bindings (wasm-bindgen); not published.
-    src/lib.rs       # run(program, variables, executors, limits) for JavaScript;
-                     #   executors are objects of JavaScript functions
-                     #   ({ text: { trim } }), bridged via send_wrapper
+    src/lib.rs       # compile(program, executors, limits) → Program, and
+                     #   run(program, variables, executors, limits), for
+                     #   JavaScript; executors are objects of JavaScript
+                     #   functions ({ text: { trim } }), bridged via send_wrapper
     tests/web.rs     # wasm-bindgen-test: Node by default, browsers too
     npm/             # the npm package @cody-script/core-wasm: build.sh,
                      #   package.json template, README, smoke.mjs (Node)

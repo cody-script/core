@@ -240,7 +240,8 @@ Engine::builder()
 engine.has_function("text.trim") -> bool
 
 engine.compile(&program) -> Result<CompiledProgram, Error>
-engine.run(&program, options).await -> Result<RunResult, Error>   // compile + run
+engine.compile_owned(program) -> Result<CompiledProgram, Error>  // keeps it, no copy
+engine.run(&program, options).await -> Result<RunResult, Error>   // compile + run once
 engine.run_blocking(&program, options) -> Result<RunResult, Error>
 compiled.run(options).await / compiled.run_blocking(options)
 compiled.program() -> &Value
@@ -284,7 +285,11 @@ RunResult { value: Value, variables: Map, steps: u64 }
   executor that returns a boxed `codyscript_core::Error` fails the run with
   exactly that error.
 - **Isolation** — `compile` copies the program, so later changes to the
-  source value can't reach a compiled program.
+  source value can't reach a compiled program. `compile_owned` takes the
+  program instead of copying it, for one that was just parsed or built.
+- **Compile once** — compiling is most of the cost of a short run (parsing
+  and compiling a small rule takes several times as long as running it), so
+  compile a program once and keep the `CompiledProgram` for every run.
 
 An async executor, a run with variables, and an error:
 
