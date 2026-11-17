@@ -240,7 +240,8 @@ Engine::builder()
 engine.has_function("text.trim") -> bool
 
 engine.compile(&program) -> Result<CompiledProgram, Error>
-engine.run(&program, options).await -> Result<RunResult, Error>   // compile + run
+engine.compile_owned(program) -> Result<CompiledProgram, Error>  // keeps it, no copy
+engine.run(&program, options).await -> Result<RunResult, Error>   // compile + run once
 engine.run_blocking(&program, options) -> Result<RunResult, Error>
 compiled.run(options).await / compiled.run_blocking(options)
 compiled.program() -> &Value
@@ -284,7 +285,11 @@ RunResult { value: Value, variables: Map, steps: u64 }
   executor that returns a boxed `codyscript_core::Error` fails the run with
   exactly that error.
 - **Isolation** — `compile` copies the program, so later changes to the
-  source value can't reach a compiled program.
+  source value can't reach a compiled program. `compile_owned` takes the
+  program instead of copying it, for one that was just parsed or built.
+- **Compile once** — compiling is most of the cost of a short run (parsing
+  and compiling a small rule takes several times as long as running it), so
+  compile a program once and keep the `CompiledProgram` for every run.
 
 An async executor, a run with variables, and an error:
 
@@ -380,6 +385,21 @@ Rust can't express:
 
 The program format is shared with the TypeScript package, so its history
 applies.
+
+### 0.6.0 → 0.6.1 (additive)
+
+Faster and leaner, with the same format, behaviour, messages and error
+codes: every 0.6.0 program runs as before. Compiling allocates about half
+as much and runs allocate far less. Two additions:
+
+- **`Engine::compile_owned(program)`** compiles a program it takes, rather
+  than copying it; `compile_json` uses it.
+- **In JavaScript, `compile(program, executors, limits)`** returns a
+  `Program` to run many times with `program.run(variables)`. It throws a
+  `CodyScriptError` for an invalid program (see `codyscript-wasm`).
+
+Compile a program once and keep the `CompiledProgram` (or `Program`) for
+every run: for a small rule, compiling costs several times what a run does.
 
 ### 0.5 → 0.6 (format change; needs Rust 1.99)
 

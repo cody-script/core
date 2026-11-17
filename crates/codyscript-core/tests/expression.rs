@@ -207,6 +207,18 @@ fn every_operator_counts_toward_max_steps() {
 }
 
 #[test]
+fn an_operator_is_counted_before_its_operands_are_read() {
+    // The node (1), then + (2), && (3) and a (4), which isn't defined.
+    let at = |max_steps| {
+        let engine = Engine::builder().max_steps(max_steps).build();
+        failure(run(&engine, &x("(a && b) + b"))).code()
+    };
+    assert_eq!(at(2), ErrorCode::StepLimit); // at "+", before anything is read
+    assert_eq!(at(3), ErrorCode::StepLimit); // at "&&"
+    assert_eq!(at(4), ErrorCode::UndefinedVariable); // "a", read
+}
+
+#[test]
 fn a_short_circuit_skips_the_steps_of_its_other_side() {
     assert_eq!(run(&Engine::new(), &x("false && 1 + 2")).unwrap().steps, 3);
 }

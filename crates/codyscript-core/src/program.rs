@@ -2,8 +2,10 @@
 //! node carries its JSON Pointer so a failure can name it without the engine
 //! tracking paths as it runs.
 
+use std::fmt;
 use std::sync::Arc;
 
+use crate::executor::Executor;
 use crate::expression::Ast;
 use crate::value::Value;
 
@@ -33,8 +35,9 @@ pub(crate) enum InputKind {
     Ref(String),
     /// `x`: an expression.
     X(Expression),
-    /// `call` of an external function: the host's executor runs it.
-    External(External),
+    /// `call` of an external function: the host's executor runs it. Boxed,
+    /// as the largest kind by far, so every other input stays small.
+    External(Box<External>),
     /// `call` of one of the program's own functions.
     Call(Call),
     /// `do`: a block with its own scope.
@@ -43,14 +46,16 @@ pub(crate) enum InputKind {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Expression {
-    pub source: String,
+    pub source: Arc<str>,
     pub ast: Arc<Ast>,
     /// Where failures point: the node's `/x`.
     pub path: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct External {
+    /// The executor, found when the program was compiled.
+    pub executor: Arc<dyn Executor>,
     /// The executor id: the function's name up to its first dot.
     pub exe: String,
     /// The function's name within its executor: what follows the first dot
@@ -60,6 +65,17 @@ pub(crate) struct External {
     pub args: Vec<(String, Input)>,
     /// The static `arg`, passed as written.
     pub arg: Option<Value>,
+}
+
+impl fmt::Debug for External {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("External")
+            .field("exe", &self.exe)
+            .field("op", &self.op)
+            .field("args", &self.args)
+            .field("arg", &self.arg)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug)]

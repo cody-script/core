@@ -86,7 +86,7 @@ pub trait EngineJsonExt {
 impl EngineJsonExt for Engine {
     fn compile_json(&self, json: &str) -> Result<CompiledProgram, Error> {
         let program: Value = from_str(json).map_err(syntax_error)?;
-        self.compile(&program)
+        self.compile_owned(program)
     }
 }
 

@@ -13,6 +13,7 @@ use std::task::{Context, Poll};
 use codyscript_core::{
     CompiledProgram, Engine, ExecutorCall, ExecutorResult, RunOptions, Value, Variables, value,
 };
+use codyscript_json::EngineJsonExt;
 
 // ── Programs ────────────────────────────────────────────────────────────────
 
@@ -252,11 +253,17 @@ pub fn compile(engine: &Engine, program: &Value) -> CompiledProgram {
 }
 
 /// Parses, compiles, runs and prints the README rule, as a JSON-in,
-/// JSON-out host would: what one stored rule costs per row.
+/// JSON-out host that compiles the rule for every row would.
 pub fn json_end_to_end(engine: &Engine, rule_json: &str, row_json: &str) -> String {
-    let program: Value = codyscript_json::from_str(rule_json).expect("JSON");
+    let rule = engine.compile_json(rule_json).expect("the rule compiles");
+    json_row(&rule, row_json)
+}
+
+/// Parses a row, runs a compiled rule on it and prints the result: what a
+/// row costs a host that compiles its rule once.
+pub fn json_row(rule: &CompiledProgram, row_json: &str) -> String {
     let row: Variables = codyscript_json::from_str(row_json).expect("JSON");
-    let result = compile(engine, &program)
+    let result = rule
         .run_blocking(RunOptions::from(row))
         .expect("the rule runs");
     codyscript_json::to_string(&result).expect("JSON")
@@ -279,6 +286,7 @@ pub fn memory_scenarios() -> Vec<MemoryScenario> {
     let calls = compile(&engine, &call_loop());
     let calls_async = compile(&engine_with_async_math(), &call_loop());
     let rule_json = readme_rule_json();
+    let readme_json = engine.compile_json(&rule_json).expect("the rule compiles");
     let (e1, e2, e3) = (engine.clone(), engine.clone(), engine.clone());
     vec![
         (
@@ -322,6 +330,10 @@ pub fn memory_scenarios() -> Vec<MemoryScenario> {
                     r#"{"Name":"  Ada  "}"#,
                 ))
             }),
+        ),
+        (
+            "JSON in, run, JSON out (README rule, compiled once)",
+            Box::new(move || keep(json_row(&readme_json, r#"{"Name":"  Ada  "}"#))),
         ),
     ]
 }

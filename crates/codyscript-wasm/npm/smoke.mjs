@@ -1,6 +1,7 @@
 // Checks a built package (build.sh's output; its directory is the argument)
 // the way a Node user would load it: initialised from the module's bytes,
-// then a run calling a sync and an async JavaScript function, and a failing run.
+// then a run calling a sync and an async JavaScript function, a failing
+// run, and a program compiled once and run twice.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -8,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 const dir = resolve(process.argv[2] ?? "target/npm");
 const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
-const { default: init, run, version, schema } = await import(pathToFileURL(join(dir, pkg.exports["."].default)));
+const { default: init, compile, run, version, schema } = await import(pathToFileURL(join(dir, pkg.exports["."].default)));
 await init({ module_or_path: await readFile(join(dir, "codyscript_wasm_bg.wasm")) });
 
 assert.equal(version(), pkg.version);
@@ -42,5 +43,16 @@ assert.deepEqual(empty.value, { error: "Name is required" });
 
 const failed = JSON.parse(await run("{", "", null, ""));
 assert.equal(failed.ok, false);
+
+const compiled = compile(program, executors, "");
+assert.equal(JSON.parse(await compiled.run('{"Name":"  Ada "}')).value, "Ada");
+assert.equal(JSON.parse(await compiled.run('{"Name":" Grace"}')).value, "Grace");
+compiled.free();
+
+assert.throws(() => compile('{ "ext": { "nope": ["x"] }, "call": { "nope.x": {} } }', null, ""), {
+	name: "CodyScriptError",
+	code: "unknown_function",
+	path: "/ext/nope/0",
+});
 
 console.log(`${pkg.name}@${pkg.version}: ok`);
