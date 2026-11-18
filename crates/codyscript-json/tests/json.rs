@@ -3,7 +3,7 @@
 #[path = "../../codyscript-core/tests/common/mod.rs"]
 mod common;
 
-use codyscript_core::{Engine, ErrorCode, Map, RunOptions, Value, Variables, value};
+use codyscript_core::{Engine, ErrorCode, Map, RunConfig, RunOptions, Value, Variables, value};
 use codyscript_json::{
     EngineJsonExt, from_reader, from_serde_json, from_slice, from_str, to_serde_json, to_string,
     to_string_pretty, to_vec, to_writer,
@@ -27,10 +27,15 @@ fn objects_keep_document_order_and_round_trip() {
 }
 
 #[test]
-fn a_repeated_key_keeps_its_first_place_and_last_value_like_json_parse() {
-    let value: Value = from_str(r#"{"a":1,"b":2,"a":3}"#).unwrap();
-    assert_eq!(keys(&value), ["a", "b"]);
-    assert_eq!(value["a"], 3);
+fn a_repeated_key_is_an_error() {
+    let error = from_str::<Value>(r#"{"a":1,"b":2,"a":3}"#).unwrap_err();
+    assert!(error.to_string().contains(r#"repeated key "a""#), "{error}");
+    // Everywhere an object is read: programs, variables, run configurations.
+    assert!(from_str::<Variables>(r#"{"n":1,"n":1}"#).is_err());
+    assert!(from_str::<RunConfig>(r#"{"variables":{"n":1,"n":2}}"#).is_err());
+    let engine = Engine::new();
+    let error = engine.compile_json(r#"{"x":"1","x":"2"}"#).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::InvalidProgram);
 }
 
 #[test]
@@ -122,7 +127,7 @@ fn pauses_steps_and_actions_are_written_as_json() {
     assert!(steps.ends_with(
         r#"{"path":"/fn/twice/do/0","kind":"ret","function":"twice","depth":0},{"path":"/fn/twice/do/0/ret","kind":"x","name":"v * 2","function":"twice","depth":1}]"#
     ));
-    let actions: Vec<Action> = from_str(r#"["stepOver","stepInto","continue","stop"]"#).unwrap();
+    let actions: Vec<Action> = from_str(r#"["step_over","step_into","continue","stop"]"#).unwrap();
     assert_eq!(
         actions,
         [

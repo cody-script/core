@@ -23,15 +23,14 @@ pub type Variables = Map;
 /// Bounds on what one program may consume.
 ///
 /// Serializable, so limits can live in configuration; as data their fields
-/// are `maxSteps` and `maxDepth`, as in the TypeScript package, and a missing
-/// one takes its default.
+/// are `max_steps` and `max_depth`, and a missing one takes its default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(default)]
 pub struct Limits {
     /// Nodes evaluated per run (each instruction, input, loop test and
     /// expression operand). Default 100 000.
     pub max_steps: u64,
-    /// Maximum JSON nesting depth of a program, of an expression's
+    /// Maximum nesting depth of a program, of an expression's
     /// parentheses and unary operators, and of function calls while running.
     /// Default 128. Compiling recurses this deep, so keep it modest.
     pub max_depth: usize,

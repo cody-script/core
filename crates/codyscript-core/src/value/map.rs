@@ -90,6 +90,16 @@ impl Map {
         None
     }
 
+    /// Inserts `key` if it's new; if it isn't, changes nothing and hands
+    /// both back.
+    pub(crate) fn insert_new(&mut self, key: String, value: Value) -> Result<(), (String, Value)> {
+        if self.position(&key).is_some() {
+            return Err((key, value));
+        }
+        self.insert(key, value);
+        Ok(())
+    }
+
     /// The value for `key`, inserting `null` first if it's missing.
     pub(crate) fn get_or_insert_null(&mut self, key: &str) -> &mut Value {
         let i = match self.position(key) {

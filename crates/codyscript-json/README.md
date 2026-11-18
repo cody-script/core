@@ -32,13 +32,12 @@ assert_eq!(codyscript_json::to_string(&result).unwrap(),
 - `from_str`, `from_slice`, `from_reader` parse JSON into a `Value` (a
   program, any value), `Variables` (must be an object) or any
   `Deserialize` type. Objects keep their keys in document order; a
-  repeated key keeps its first place and its last value, as `JSON.parse`
-  does. Nesting is limited to 128 levels, the default `max_depth`.
+  repeated key is an error (`repeated key "a"`). Nesting is limited to 128
+  levels, the default `max_depth`.
 - `to_string`, `to_string_pretty`, `to_vec`, `to_writer` write a `Value`, a
   `RunResult` (`{ value, variables, steps }`), an `Error`
   (`{ code, message, path, tag?, issues? }`) or anything serializable.
-  Numbers JSON can't hold (`NaN`, `Infinity`) are written as `null`, as
-  `JSON.stringify` does.
+  Numbers JSON can't hold (`NaN`, `Infinity`) are written as `null`.
 - `engine.compile_json(text)` (from `EngineJsonExt`) parses and compiles in
   one go, keeping the parsed program rather than a copy. Compile a stored
   rule once and run the `CompiledProgram` for each row: parsing and

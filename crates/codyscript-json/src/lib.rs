@@ -34,8 +34,7 @@ pub const RUN_CONFIG_SCHEMA: &str = include_str!("../run-config.schema.json");
 
 /// Parses JSON text: a program or any other [`Value`], or [`Variables`]
 /// (which must be an object), or any type that implements `Deserialize`.
-/// Objects keep their keys in document order; a repeated key keeps its first
-/// place and its last value, as `JSON.parse` does.
+/// Objects keep their keys in document order; a repeated key is an error.
 ///
 /// Nesting is limited to 128 levels, as `compile`'s default `max_depth` is.
 ///
@@ -58,8 +57,7 @@ pub fn from_reader<R: io::Read, T: DeserializeOwned>(reader: R) -> serde_json::R
 
 /// Writes a value, a [`RunResult`](codyscript_core::RunResult), an
 /// [`Error`] or anything else serializable as compact JSON. Numbers that
-/// JSON can't hold (`NaN`, `Infinity`) are written as `null`, as
-/// `JSON.stringify` does.
+/// JSON can't hold (`NaN`, `Infinity`) are written as `null`.
 pub fn to_string<T: Serialize + ?Sized>(value: &T) -> serde_json::Result<String> {
     serde_json::to_string(value)
 }

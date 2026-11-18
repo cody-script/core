@@ -92,17 +92,8 @@
 			"description": "An opaque label echoed back in errors.",
 			"type": "string"
 		},
-		"key": {
-			"not": {
-				"enum": [
-					"__proto__",
-					"prototype",
-					"constructor"
-				]
-			}
-		},
 		"value": {
-			"description": "Any JSON value. Keys __proto__, prototype and constructor are refused.",
+			"description": "Any value.",
 			"anyOf": [
 				{
 					"$ref": "#/$defs/literal"
@@ -115,9 +106,6 @@
 				},
 				{
 					"type": "object",
-					"propertyNames": {
-						"$ref": "#/$defs/key"
-					},
 					"additionalProperties": {
 						"$ref": "#/$defs/value"
 					}
@@ -128,14 +116,7 @@
 			"description": "The program's own functions, by name: each a program of its own, whose only variables are its arguments. Names may contain dots (\"text.size\"), but none may also be in \"ext\". Only the root may carry it.",
 			"type": "object",
 			"propertyNames": {
-				"allOf": [
-					{
-						"$ref": "#/$defs/name"
-					},
-					{
-						"$ref": "#/$defs/key"
-					}
-				]
+				"$ref": "#/$defs/name"
 			},
 			"additionalProperties": {
 				"$ref": "#/$defs/input"
@@ -148,9 +129,6 @@
 				"allOf": [
 					{
 						"$ref": "#/$defs/name"
-					},
-					{
-						"$ref": "#/$defs/key"
 					},
 					{
 						"pattern": "^[^.]+$"
@@ -229,14 +207,7 @@
 						"description": "Arguments, resolved in order. A CodyScript function's are its variables.",
 						"type": "object",
 						"propertyNames": {
-							"allOf": [
-								{
-									"$ref": "#/$defs/name"
-								},
-								{
-									"$ref": "#/$defs/key"
-								}
-							]
+							"$ref": "#/$defs/name"
 						},
 						"additionalProperties": {
 							"$ref": "#/$defs/input"
@@ -280,14 +251,7 @@
 					"minProperties": 1,
 					"maxProperties": 1,
 					"propertyNames": {
-						"allOf": [
-							{
-								"$ref": "#/$defs/name"
-							},
-							{
-								"$ref": "#/$defs/key"
-							}
-						]
+						"$ref": "#/$defs/name"
 					},
 					"additionalProperties": {
 						"$ref": "#/$defs/input"

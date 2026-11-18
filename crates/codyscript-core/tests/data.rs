@@ -5,7 +5,9 @@ mod common;
 
 use codyscript_core::{Engine, Error, ErrorCode, Limits, RunOptions, RunResult, Value, value};
 use common::*;
-use serde_test::{Token, assert_de_tokens, assert_ser_tokens, assert_tokens};
+use serde_test::{
+    Token, assert_de_tokens, assert_de_tokens_error, assert_ser_tokens, assert_tokens,
+};
 
 // ── Non-finite numbers: some formats (YAML, CBOR) can express them ─────────
 
@@ -47,20 +49,31 @@ fn refuses_numbers_that_arent_finite() {
 }
 
 #[test]
-fn an_overflowing_literal_is_infinity_as_in_javascript() {
+fn an_overflowing_literal_is_refused_so_programs_stay_finite() {
     let huge = format!("1{}", "0".repeat(400));
-    let program = m(vec![when(
-        x(&huge),
-        vec![ret(x(&format!("-{huge}")))],
-        None,
-    )]);
-    let value = run(&Engine::new(), &program).unwrap().value;
-    assert_eq!(value.as_f64(), Some(f64::NEG_INFINITY));
-    let error = compile_error(&Engine::new(), &x(&format!("1 {huge}")));
+    let error = compile_error(&Engine::new(), &x(&format!("-{huge}")));
+    assert_eq!(error.code(), ErrorCode::InvalidProgram);
+    assert_eq!(error.path(), "/x");
     assert!(
         error
             .message()
-            .starts_with("Invalid program: Unexpected null in")
+            .contains(&format!(r#"Number "{huge}" is too large"#))
+    );
+}
+
+#[test]
+fn a_repeated_key_is_an_error_in_any_format() {
+    // Serde tokens stand in for any format: CBOR, YAML, …
+    assert_de_tokens_error::<Value>(
+        &[
+            Token::Map { len: Some(2) },
+            Token::Str("a"),
+            Token::I64(1),
+            Token::Str("a"),
+            Token::I64(2),
+            Token::MapEnd,
+        ],
+        r#"repeated key "a""#,
     );
 }
 
@@ -218,12 +231,12 @@ fn limits_read_from_configuration_with_defaults() {
                 name: "Limits",
                 len: 1,
             },
-            Token::Str("maxSteps"),
+            Token::Str("max_steps"),
             Token::U64(500),
             Token::StructEnd,
         ],
     );
-    let limits: Limits = from_cbor(&to_cbor(&value!({ "maxDepth": 16 })));
+    let limits: Limits = from_cbor(&to_cbor(&value!({ "max_depth": 16 })));
     assert_eq!(
         limits,
         Limits {

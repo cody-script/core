@@ -14,7 +14,7 @@ const executors = {
 };
 // A program declares what it uses: { "ext": { "text": ["trim"] }, … },
 // and calls it: { "call": { "text.trim": { "value": { "ref": "Name" } } } }.
-const program = compile(programJson, executors, '{"maxSteps":10000}'); // once…
+const program = compile(programJson, executors, '{"max_steps":10000}'); // once…
 for (const row of rows) {
   const outcome = JSON.parse(await program.run(row));                 // …then per row
   if (outcome.ok) console.log(outcome.value, outcome.variables, outcome.steps);
@@ -34,7 +34,7 @@ Promise<string>`, which compiles and runs in one go.
 | `program` | JSON text. |
 | `variables` | JSON text of an object, or `""`. |
 | `executors` | `{ id: { name: (call) => value, … }, … }` or `null`: each executor an object of the external functions it provides, which a program declares in `ext` (`{ "text": ["trim"] }`) and calls as `text.trim`. A call is `{ op, arg?, input }` (`op` is the function's own name); return a JSON value or a promise of one. `undefined` is `null`; throwing or rejecting fails the run with `function_failed`. |
-| `limits` | JSON text like `{"maxSteps":10000,"maxDepth":64}`, or `""`. |
+| `limits` | JSON text like `{"max_steps":10000,"max_depth":64}`, or `""`. |
 
 A run resolves with JSON text, `{"ok":true,"value":…,"variables":…,"steps":…}`
 or `{"ok":false,"error":{"code":…,"message":…,"path":…,"tag"?:…,"issues"?:…}}`
@@ -68,7 +68,7 @@ const outcome = JSON.parse(await debug(programJson, config, executors, "", (paus
   // pause: { reason, path, kind, name?, tag?, function?, depth, steps, breakpoints,
   //          frames: [{ function?, call?, scopes: [{…}, …] }, …] }
   show(pause);                                  // your UI
-  return new Promise((resolve) => (onClick = resolve));   // "stepOver", …
+  return new Promise((resolve) => (onClick = resolve));   // "step_over", …
 }));
 ```
 
@@ -85,7 +85,7 @@ const outcome = JSON.parse(await debug(programJson, config, executors, "", (paus
   (`"set"`, `"call"`, …), `frames` the call stack — the program's body
   first, then each CodyScript function running, each with its scopes,
   outermost first.
-- `onPause` returns, or resolves to, `"stepOver"`, `"stepInto"`,
+- `onPause` returns, or resolves to, `"step_over"`, `"step_into"`,
   `"continue"` or `"stop"` — or `{ action, breakpoints }` to replace the
   breakpoints as well (checked the same way). `"stop"` ends the run with an
   `aborted` error.

@@ -48,7 +48,8 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    /// The code as written in JSON and the documentation: `"invalid_program"`, …
+    /// The code as data (in any format) and in the documentation:
+    /// `"invalid_program"`, …
     pub const fn as_str(self) -> &'static str {
         match self {
             ErrorCode::InvalidProgram => "invalid_program",

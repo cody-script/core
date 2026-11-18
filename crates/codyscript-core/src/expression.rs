@@ -1,7 +1,8 @@
 //! The expression language `{ "x": "…" }` nodes use: numbers, 'text', true,
 //! false, null, variable names, `+ - * /`, parentheses, one comparison
-//! (`== != < <= > >=`), `&& ||` and `!`. Parsed once at compile time by hand
-//! and evaluated against the run's scope by walking the tree.
+//! (`== != < <= > >=`), `&& ||` and `!` (on booleans only), and `??`.
+//! Parsed once at compile time by hand and evaluated against the run's scope
+//! by walking the tree.
 //!
 //! The tree is a flat arena and evaluation uses an explicit stack, so neither
 //! running nor dropping a long chain like `a + a + … + a` recurses: an
@@ -38,6 +39,8 @@ enum Unary {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
+    /// `??`: the left side unless it's `null`, else the right.
+    Default,
     Or,
     And,
     Eq,
@@ -55,6 +58,7 @@ enum Op {
 impl Op {
     fn as_str(self) -> &'static str {
         match self {
+            Op::Default => "??",
             Op::Or => "||",
             Op::And => "&&",
             Op::Eq => "==",
@@ -72,14 +76,15 @@ impl Op {
 }
 
 /// Binary operators by precedence, loosest first.
-const LEVELS: [&[Op]; 5] = [
+const LEVELS: [&[Op]; 6] = [
+    &[Op::Default],
     &[Op::Or],
     &[Op::And],
     &[Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge],
     &[Op::Add, Op::Sub],
     &[Op::Mul, Op::Div],
 ];
-const COMPARISON: usize = 2;
+const COMPARISON: usize = 3;
 
 /// The operator at level `p` spelled `symbol`, if there is one.
 fn level_op(p: usize, symbol: Option<&str>) -> Option<Op> {
@@ -98,26 +103,6 @@ enum Token<'s> {
     Sym(&'s str),
 }
 
-/// JavaScript's `\s`: WhiteSpace and LineTerminator.
-fn is_space(c: char) -> bool {
-    matches!(
-        c,
-        '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200A}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202F}'
-                | '\u{205F}'
-                | '\u{3000}'
-                | '\u{FEFF}'
-    )
-}
-
-/// What JavaScript's `.` doesn't match.
-fn is_line_terminator(c: char) -> bool {
-    matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
-}
-
 fn is_word(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
@@ -127,10 +112,11 @@ fn span(s: &str, pred: impl Fn(char) -> bool) -> usize {
     s.find(|c: char| !pred(c)).unwrap_or(s.len())
 }
 
-/// The token starting at `source[start..]` and where it ends, if one does.
-fn token_at(source: &str, start: usize) -> Option<(Token<'_>, usize)> {
+/// The token starting at `source[start..]`, which isn't whitespace, and
+/// where it ends.
+fn token_at(source: &str, start: usize) -> Result<(Token<'_>, usize), String> {
     let rest = &source[start..];
-    let c = rest.chars().next()?;
+    let c = rest.chars().next().unwrap_or(' ');
     // A number: \d+(\.\d+)?
     if c.is_ascii_digit() {
         let mut end = start + span(rest, |c| c.is_ascii_digit());
@@ -138,24 +124,15 @@ fn token_at(source: &str, start: usize) -> Option<(Token<'_>, usize)> {
         if tail.starts_with('.') && tail[1..].starts_with(|c: char| c.is_ascii_digit()) {
             end += 1 + span(&tail[1..], |c| c.is_ascii_digit());
         }
-        let n = source[start..end].parse::<f64>().unwrap_or(f64::INFINITY);
-        return Some((Token::Num(n), end));
+        let digits = &source[start..end];
+        return match digits.parse::<f64>() {
+            Ok(n) if n.is_finite() => Ok((Token::Num(n), end)),
+            _ => Err(format!("Number \"{digits}\" is too large")),
+        };
     }
-    // Text: '…', where \x stands for x (not a line break).
     if c == '\'' {
-        let mut text = String::new();
-        let mut chars = rest.char_indices().skip(1);
-        while let Some((i, ch)) = chars.next() {
-            match ch {
-                '\'' => return Some((Token::Lit(Value::String(text)), start + i + 1)),
-                '\\' => match chars.next() {
-                    Some((_, escaped)) if !is_line_terminator(escaped) => text.push(escaped),
-                    _ => return None,
-                },
-                _ => text.push(ch),
-            }
-        }
-        return None;
+        let (text, len) = text(rest)?;
+        return Ok((Token::Lit(Value::String(text)), start + len));
     }
     // A name or keyword: [A-Za-z_]\w*
     if c.is_ascii_alphabetic() || c == '_' {
@@ -167,42 +144,67 @@ fn token_at(source: &str, start: usize) -> Option<(Token<'_>, usize)> {
             "null" => Token::Lit(Value::Null),
             _ => Token::Sym(word),
         };
-        return Some((token, end));
+        return Ok((token, end));
     }
-    for op in ["==", "!=", "<=", ">=", "&&", "||"] {
+    for op in ["==", "!=", "<=", ">=", "&&", "||", "??"] {
         if rest.starts_with(op) {
-            return Some((Token::Sym(&rest[..2]), start + 2));
+            return Ok((Token::Sym(&rest[..2]), start + 2));
         }
     }
     if "-+*/()<>!".contains(c) {
-        return Some((Token::Sym(&rest[..1]), start + 1));
+        return Ok((Token::Sym(&rest[..1]), start + 1));
     }
-    None
+    Err(format!("Unexpected \"{c}\""))
 }
 
-fn tokenize(source: &str) -> Result<Vec<Token<'_>>, String> {
-    let mut tokens = Vec::new();
-    let mut pos = 0;
-    while pos < source.len() {
-        let start = pos + span(&source[pos..], is_space);
-        match token_at(source, start) {
-            Some((token, end)) => {
-                tokens.push(token);
-                pos = end;
-            }
-            None => match source[start..].chars().next() {
-                None => break, // only whitespace left
-                Some(c) => return Err(format!("Unexpected \"{c}\"")),
-            },
+/// Text in single quotes at the start of `rest`, and its length there. `\n`
+/// is a line break, `\t` a tab, `\\` a backslash and `\'` a quote; any other
+/// escape is refused.
+fn text(rest: &str) -> Result<(String, usize), String> {
+    let mut text = String::new();
+    let mut chars = rest.char_indices().skip(1);
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\'' => return Ok((text, i + 1)),
+            '\\' => text.push(match chars.next() {
+                Some((_, 'n')) => '\n',
+                Some((_, 't')) => '\t',
+                Some((_, '\\')) => '\\',
+                Some((_, '\'')) => '\'',
+                Some((_, other)) => {
+                    let other = other.escape_debug();
+                    return Err(format!(
+                        r#"Unknown escape "\{other}"; use \n, \t, \\ or \'"#
+                    ));
+                }
+                None => break,
+            }),
+            c => text.push(c),
         }
     }
-    Ok(tokens)
+    Err("Text has no closing \"'\"".into())
+}
+
+/// The tokens of `source`, each with its text as written.
+fn tokenize(source: &str) -> Result<Vec<(Token<'_>, &str)>, String> {
+    let mut tokens = Vec::new();
+    let mut pos = 0;
+    loop {
+        pos += span(&source[pos..], char::is_whitespace);
+        if pos == source.len() {
+            return Ok(tokens);
+        }
+        let (token, end) = token_at(source, pos)?;
+        tokens.push((token, &source[pos..end]));
+        pos = end;
+    }
 }
 
 // ── Parser ──────────────────────────────────────────────────────────────────
 
 struct Parser<'s> {
-    tokens: Vec<Token<'s>>,
+    /// Each with its text as written, for messages.
+    tokens: Vec<(Token<'s>, &'s str)>,
     i: usize,
     depth: usize,
     max_depth: usize,
@@ -213,7 +215,7 @@ impl<'s> Parser<'s> {
     /// The symbol at the cursor, if the token there is one.
     fn peek(&self) -> Option<&'s str> {
         match self.tokens.get(self.i) {
-            Some(Token::Sym(s)) => Some(s),
+            Some((Token::Sym(s), _)) => Some(s),
             _ => None,
         }
     }
@@ -250,7 +252,7 @@ impl<'s> Parser<'s> {
                 self.max_depth
             ));
         }
-        let token = self.tokens.get_mut(self.i).map(|t| match t {
+        let token = self.tokens.get_mut(self.i).map(|(t, _)| match t {
             Token::Num(n) => Token::Num(*n),
             Token::Lit(v) => Token::Lit(v.take()),
             Token::Sym(s) => Token::Sym(s),
@@ -299,12 +301,8 @@ pub(crate) fn parse(source: &str, max_depth: usize) -> Result<Ast, String> {
         nodes,
     };
     let root = parser.level(0)?;
-    if let Some(token) = parser.tokens.get(parser.i) {
-        return Err(match token {
-            Token::Sym(s) => format!("Unexpected \"{s}\""),
-            Token::Num(n) => format!("Unexpected {}", stringify_number(*n)),
-            Token::Lit(v) => format!("Unexpected {}", stringify_literal(v)),
-        });
+    if let Some((_, text)) = parser.tokens.get(parser.i) {
+        return Err(format!("Unexpected \"{text}\""));
     }
     Ok(Ast {
         nodes: parser.nodes,
@@ -341,7 +339,7 @@ pub(crate) enum Fault {
 }
 
 /// A value during evaluation: borrowed from the tree or the scope where
-/// possible. A number remembers the JSON number it was read from, if any, so
+/// possible. A number remembers the [`Number`] it was read from, if any, so
 /// `a || 0` returns `a` exactly.
 #[derive(Clone, Copy)]
 enum V<'v> {
@@ -376,17 +374,6 @@ impl<'v> V<'v> {
         }
     }
 
-    /// JavaScript truthiness.
-    fn truthy(self) -> bool {
-        match self {
-            V::Null => false,
-            V::Bool(b) => b,
-            V::Num(n, _) => n != 0.0 && !n.is_nan(),
-            V::Str(s) => !s.is_empty(),
-            V::List(_) | V::Obj(_) => true,
-        }
-    }
-
     /// An array or object: not comparable with `==` or ordering.
     fn is_list(self) -> bool {
         matches!(self, V::List(_) | V::Obj(_))
@@ -404,7 +391,8 @@ impl<'v> V<'v> {
     }
 }
 
-/// JavaScript's `===` on values that aren't lists or objects.
+/// Equality of values that aren't lists or objects: the same type, and
+/// equal (numbers numerically, so `1 == 1.0`).
 fn strict_eq(a: V<'_>, c: V<'_>) -> bool {
     match (a, c) {
         (V::Null, V::Null) => true,
@@ -416,9 +404,9 @@ fn strict_eq(a: V<'_>, c: V<'_>) -> bool {
 }
 
 /// A computed number as a value: whole numbers that fit an `i64` become
-/// integers, so `1 + 2` is `3` (not `3.0`) and `1e18` is an exact integer, as
-/// JavaScript would write them. Anything else stays a float — including
-/// `Infinity`, which only an overflowing literal can produce.
+/// integers, so `1 + 2` is `3` (not `3.0`) and `1e18` is an exact integer.
+/// Anything else stays a float — including a non-finite one, which only a
+/// host's variable can bring in (`-x` of an infinite `x`).
 pub(crate) fn number(n: f64) -> Value {
     // 2^63: every whole f64 below it converts to an i64 exactly.
     const LIMIT: f64 = 9_223_372_036_854_775_808.0;
@@ -436,10 +424,14 @@ enum Task {
     /// The left operand is on the value stack; evaluate the right one.
     Right(Op, usize),
     Apply(Op),
+    /// The right operand of `&&` or `||` is on the value stack, and must be
+    /// a boolean.
+    Boolean(Op),
 }
 
-/// Evaluates `ast`. `&&` and `||` short-circuit and return an operand, as in
-/// JavaScript. Every node evaluated is one step, counted before its operands.
+/// Evaluates `ast`. `&&`, `||` and `??` short-circuit: their right side is
+/// evaluated only when it decides the result. Every node evaluated is one
+/// step, counted before its operands.
 pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Value, Fault> {
     let mut tasks = Stack::new(Task::Apply(Op::Add)); // (only a filler)
     let mut values = Stack::new(V::Null);
@@ -472,19 +464,26 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
             Task::Unary(op) => {
                 let a = pop(&mut values);
                 values.push(match (op, a) {
-                    (Unary::Not, _) => V::Bool(!a.truthy()),
+                    (Unary::Not, V::Bool(b)) => V::Bool(!b),
                     (Unary::Neg, V::Num(n, _)) => V::Num(-n, None),
-                    (Unary::Neg, _) => {
-                        return Err(Fault::Type(format!(
-                            "\"-\" needs a number, got {}",
-                            a.kind()
-                        )));
-                    }
+                    (Unary::Not, _) => return Err(needs("!", "a boolean", a)),
+                    (Unary::Neg, _) => return Err(needs("-", "a number", a)),
                 });
             }
             Task::Right(op @ (Op::And | Op::Or), c) => {
                 let a = values.last().unwrap_or(V::Null);
-                if (op == Op::And) == a.truthy() {
+                let V::Bool(b) = a else {
+                    return Err(needs(op.as_str(), "booleans", a));
+                };
+                // `false && …` and `true || …` are decided: the left side.
+                if (op == Op::And) == b {
+                    values.pop();
+                    tasks.push(Task::Boolean(op));
+                    next = Some(c);
+                }
+            }
+            Task::Right(Op::Default, c) => {
+                if let Some(V::Null) = values.last() {
                     values.pop();
                     next = Some(c);
                 }
@@ -497,6 +496,12 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
                 let c = pop(&mut values);
                 let a = pop(&mut values);
                 values.push(binary(op, a, c).map_err(Fault::Type)?);
+            }
+            Task::Boolean(op) => {
+                let c = values.last().unwrap_or(V::Null);
+                if !matches!(c, V::Bool(_)) {
+                    return Err(needs(op.as_str(), "booleans", c));
+                }
             }
         }
     }
@@ -566,8 +571,8 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
         Op::Lt | Op::Le | Op::Gt | Op::Ge => {
             let order = match (a, c) {
                 (V::Num(x, _), V::Num(y, _)) => x.partial_cmp(&y),
-                // JavaScript orders text by UTF-16 code units.
-                (V::Str(x), V::Str(y)) => Some(x.encode_utf16().cmp(y.encode_utf16())),
+                // Text orders by Unicode code point.
+                (V::Str(x), V::Str(y)) => Some(x.cmp(y)),
                 _ => {
                     return Err(format!(
                         "\"{sym}\" needs two numbers or two texts, got {}",
@@ -595,103 +600,37 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
                 Op::Mul => x * y,
                 _ => x / y,
             };
+            if op == Op::Div && y == 0.0 {
+                return Err("\"/\" divided by zero".into());
+            }
             if !result.is_finite() {
-                return Err(format!(
-                    "\"{sym}\" gave {} (division by zero?)",
-                    js_number(result)
-                ));
+                return Err(format!("\"{sym}\" gave {}", non_finite(result)));
             }
             Ok(V::Num(result, None))
         }
         // Short-circuited by `evaluate`; never applied.
-        Op::And | Op::Or => Ok(a),
+        Op::Default | Op::And | Op::Or => Ok(a),
     }
 }
 
-/// A number literal as JavaScript's `JSON.stringify` writes it in a message:
-/// `null` when it overflowed to `Infinity`.
-fn stringify_number(n: f64) -> String {
-    if n.is_finite() {
-        js_number(n)
-    } else {
-        "null".into()
-    }
+/// A type error: operator `op` needs `what`, and got `got`.
+fn needs(op: &str, what: &str, got: V<'_>) -> Fault {
+    Fault::Type(format!("\"{op}\" needs {what}, got {}", got.kind()))
 }
 
-/// A text, boolean or `null` literal as JavaScript's `JSON.stringify` writes
-/// it in a message.
-fn stringify_literal(v: &Value) -> String {
-    match v {
-        Value::String(s) => quote(s),
-        Value::Bool(b) => b.to_string(),
-        _ => "null".into(),
-    }
+/// What kind of value `value` is, for messages: `null`, `boolean`,
+/// `number`, `string`, `list` or `object`.
+pub(crate) fn kind(value: &Value) -> &'static str {
+    V::of(value).kind()
 }
 
-/// `s` in double quotes, escaped as `JSON.stringify` escapes it.
-fn quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str(r#"\""#),
-            '\\' => out.push_str(r"\\"),
-            '\n' => out.push_str(r"\n"),
-            '\r' => out.push_str(r"\r"),
-            '\t' => out.push_str(r"\t"),
-            '\u{8}' => out.push_str(r"\b"),
-            '\u{c}' => out.push_str(r"\f"),
-            c if c < ' ' => out.push_str(&format!(r"\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
+/// The name of a number that isn't finite, for messages.
+fn non_finite(n: f64) -> &'static str {
+    match n {
+        f64::INFINITY => "Infinity",
+        f64::NEG_INFINITY => "-Infinity",
+        _ => "NaN",
     }
-    out.push('"');
-    out
-}
-
-/// Formats a number as JavaScript's `String(n)` does.
-pub(crate) fn js_number(n: f64) -> String {
-    if n.is_nan() {
-        return "NaN".into();
-    }
-    if n.is_infinite() {
-        return if n > 0.0 { "Infinity" } else { "-Infinity" }.into();
-    }
-    if n == 0.0 {
-        return "0".into();
-    }
-    let sign = if n < 0.0 { "-" } else { "" };
-    // Rust's `{:e}` gives the shortest round-trip digits, as JavaScript does.
-    let sci = format!("{:e}", n.abs());
-    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
-    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-    let k = digits.len() as i32;
-    // The decimal point sits after `point` digits.
-    let point = exp.parse::<i32>().unwrap_or(0) + 1;
-    let body = if k <= point && point <= 21 {
-        format!("{digits}{}", "0".repeat((point - k) as usize))
-    } else if 0 < point && point <= 21 {
-        format!(
-            "{}.{}",
-            &digits[..point as usize],
-            &digits[point as usize..]
-        )
-    } else if -6 < point && point <= 0 {
-        format!("0.{}{digits}", "0".repeat((-point) as usize))
-    } else {
-        let e = point - 1;
-        let e = if e < 0 {
-            format!("-{}", -e)
-        } else {
-            format!("+{e}")
-        };
-        if k == 1 {
-            format!("{digits}e{e}")
-        } else {
-            format!("{}.{}e{e}", &digits[..1], &digits[1..])
-        }
-    };
-    format!("{sign}{body}")
 }
 
 #[cfg(test)]
@@ -699,28 +638,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn js_number_matches_javascript() {
-        for (n, s) in [
-            (0.0, "0"),
-            (-0.0, "0"),
-            (1.0, "1"),
-            (-2.5, "-2.5"),
-            (0.1, "0.1"),
-            (0.000001, "0.000001"),
-            (0.0000001, "1e-7"),
-            (1.5e-7, "1.5e-7"),
-            (123456789.0, "123456789"),
-            (1e20, "100000000000000000000"),
-            (1e21, "1e+21"),
-            (1.25e22, "1.25e+22"),
-            (f64::MAX, "1.7976931348623157e+308"),
-            (5e-324, "5e-324"),
-            (f64::INFINITY, "Infinity"),
-            (f64::NEG_INFINITY, "-Infinity"),
-            (f64::NAN, "NaN"),
-        ] {
-            assert_eq!(js_number(n), s, "{n:e}");
-        }
+    fn non_finite_numbers_are_named() {
+        assert_eq!(non_finite(f64::INFINITY), "Infinity");
+        assert_eq!(non_finite(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(non_finite(f64::NAN), "NaN");
     }
 
     #[test]
@@ -736,16 +657,6 @@ mod tests {
                 .is_f64()
         );
         assert_eq!(number(f64::INFINITY).as_f64(), Some(f64::INFINITY));
-    }
-
-    #[test]
-    fn literals_in_messages_are_written_as_json_stringify_writes_them() {
-        let text = Value::from("a\"b\\c\n\t\u{1}\u{8}\u{c}\r");
-        assert_eq!(stringify_literal(&text), r#""a\"b\\c\n\t\u0001\b\f\r""#);
-        assert_eq!(stringify_literal(&Value::Bool(true)), "true");
-        assert_eq!(stringify_literal(&Value::Null), "null");
-        assert_eq!(stringify_number(f64::INFINITY), "null");
-        assert_eq!(stringify_number(1.5), "1.5");
     }
 
     #[test]

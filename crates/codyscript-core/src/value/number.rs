@@ -7,8 +7,7 @@ use std::fmt;
 ///
 /// Any `f64` can be held, including `NaN` and the infinities, because some
 /// data formats (YAML, CBOR) can express them; `compile` refuses them in
-/// programs. Equality is numeric, as in JavaScript: `1 == 1.0`, and
-/// `NaN != NaN`.
+/// programs. Equality is numeric: `1 == 1.0`, and `NaN != NaN`.
 #[derive(Clone, Copy)]
 pub struct Number(Repr);
 

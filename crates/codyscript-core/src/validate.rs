@@ -1,5 +1,5 @@
 //! Checks a program in one walk — shape, unknown fields, finite numbers,
-//! nesting depth, reserved keys, the functions it defines and declares, what
+//! nesting depth, the functions it defines and declares, what
 //! every call names and every expression's syntax — reporting every problem,
 //! and builds the tree the engine runs.
 
@@ -40,10 +40,6 @@ const INSTRUCTIONS: Kinds = &[
 const FUNCTIONS: &str = "fn";
 const EXTERNALS: &str = "ext";
 const ROOT_FIELDS: &[&str] = &[FUNCTIONS, EXTERNALS];
-
-/// Keys no object may use, as in the JavaScript engine, where they could
-/// reach `Object.prototype`; refused so programs stay portable between the two.
-const RESERVED: [&str; 3] = ["__proto__", "prototype", "constructor"];
 
 /// Escapes one JSON Pointer (RFC 6901) reference token. Most keys need no
 /// escaping, and aren't copied.
@@ -209,18 +205,11 @@ impl Walk<'_> {
         });
     }
 
-    /// An object or array we may descend into: not too deep, no reserved keys.
-    fn container(&mut self, v: &Value, path: &str, depth: usize) -> bool {
+    /// An object or array we may descend into: not too deep.
+    fn container(&mut self, path: &str, depth: usize) -> bool {
         if depth >= self.max_depth {
             let message = format!("Program nests deeper than {} levels", self.max_depth);
             self.fail(path.into(), message);
-            return false;
-        }
-        if let Value::Object(map) = v
-            && let Some(key) = map.keys().find(|k| RESERVED.contains(&k.as_str()))
-        {
-            let message = format!("\"{key}\" is a reserved key");
-            self.fail(child(path, key), message);
             return false;
         }
         true
@@ -238,7 +227,7 @@ impl Walk<'_> {
             self.fail(path.into(), "Expected an object");
             return None;
         };
-        if !self.container(v, path, depth) {
+        if !self.container(path, depth) {
             return None;
         }
         if let Some(allowed) = allowed {
@@ -261,7 +250,7 @@ impl Walk<'_> {
         }
     }
 
-    /// Any JSON value: finite numbers, no reserved keys, not too deep.
+    /// Any value: finite numbers, not too deep.
     fn value(&mut self, v: &Value, path: &str, depth: usize) {
         match v {
             Value::Null | Value::Bool(_) | Value::String(_) => {}
@@ -272,7 +261,7 @@ impl Walk<'_> {
             }
             // Items that can't fail need no path, so none is built for them.
             Value::Array(items) => {
-                if self.container(v, path, depth) {
+                if self.container(path, depth) {
                     for (i, item) in items.iter().enumerate() {
                         if may_fail(item) {
                             self.value(item, &child_at(path, i), depth + 1);
@@ -281,7 +270,7 @@ impl Walk<'_> {
                 }
             }
             Value::Object(map) => {
-                if self.container(v, path, depth) {
+                if self.container(path, depth) {
                     for (key, item) in map {
                         if may_fail(item) {
                             self.value(item, &child(path, key), depth + 1);
@@ -297,7 +286,7 @@ impl Walk<'_> {
             self.fail(path.into(), "Expected a list of instructions");
             return None;
         };
-        if !self.container(v, path, depth) {
+        if !self.container(path, depth) {
             return None;
         }
         let mut list = Some(Vec::with_capacity(items.len()));
@@ -332,7 +321,7 @@ impl Walk<'_> {
             self.fail(path.into(), "Expected an object");
             return None;
         };
-        if !self.container(v, path, depth) {
+        if !self.container(path, depth) {
             return None;
         }
         if map.len() == 1 {
@@ -409,7 +398,7 @@ impl Walk<'_> {
                 self.fail(at, "Expected a list of function names");
                 continue;
             };
-            if !self.container(functions, &at, 2) {
+            if !self.container(&at, 2) {
                 continue;
             }
             for (i, op) in list.iter().enumerate() {

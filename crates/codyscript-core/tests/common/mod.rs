@@ -219,6 +219,17 @@ pub fn valid() -> Vec<(&'static str, Value)> {
             "a constant object whose keys look like nodes",
             val(value!({ "ref": "x", "call": {}, "fn": {}, "ext": [] })),
         ),
+        (
+            "keys that are special elsewhere (JavaScript's)",
+            value!({
+                "fn": { "constructor": { "ref": "prototype" } },
+                "ext": { "math": ["add"] },
+                "do": [
+                    { "set": { "__proto__": { "val": { "prototype": 1 } } } },
+                    { "ret": { "call": { "math.add": { "constructor": 1 } } } }
+                ]
+            }),
+        ),
         ("a reference", var("x")),
         ("an expression", x("a * 2 > 1 && !done")),
         ("a tagged expression", value!({ "x": "1", "tag": "t" })),
@@ -455,26 +466,6 @@ pub fn invalid() -> Vec<(&'static str, Value, &'static str)> {
             with_fn(call("f", value!({ "": 1 })), [("f", value!(1))]),
             "/call/f/",
         ),
-        (
-            "a reserved argument name",
-            uses_math(value!({ "call": { "math.add": { "constructor": 1 } } })),
-            "/call/math.add/constructor",
-        ),
-        (
-            "the reserved key __proto__",
-            value!({ "val": { "__proto__": 1 } }),
-            "/val/__proto__",
-        ),
-        (
-            "the reserved key prototype",
-            val(value!({ "prototype": 1 })),
-            "/val/prototype",
-        ),
-        (
-            "a reserved variable name",
-            value!({ "do": [{ "set": { "__proto__": 1 } }] }),
-            "/do/0/set/__proto__",
-        ),
         // The root's `fn` and `ext`.
         (
             "functions with no program",
@@ -490,11 +481,6 @@ pub fn invalid() -> Vec<(&'static str, Value, &'static str)> {
             "an empty function name",
             with_fn(m(vec![]), [("", value!(1))]),
             "/fn/",
-        ),
-        (
-            "a reserved function name",
-            value!({ "fn": { "constructor": 1 }, "do": [] }),
-            "/fn/constructor",
         ),
         (
             "a function that isn't an input",
@@ -540,11 +526,6 @@ pub fn invalid() -> Vec<(&'static str, Value, &'static str)> {
             "an empty executor name",
             value!({ "ext": { "": ["add"] }, "do": [] }),
             "/ext/",
-        ),
-        (
-            "a reserved executor name",
-            value!({ "ext": { "constructor": ["add"] }, "do": [] }),
-            "/ext/constructor",
         ),
         (
             "an external function declared twice",

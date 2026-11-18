@@ -65,8 +65,9 @@ fn comparisons() {
         ("a < b && b < 3", true),
         ("a == 1.0", true),
         ("null != false", true),
-        // Text orders by UTF-16 code units, as in JavaScript.
-        ("'\u{FF5E}' < '\u{1F600}'", false),
+        // Text orders by Unicode code point.
+        ("'\u{FF5E}' < '\u{1F600}'", true),
+        ("'Z' < 'a'", true),
     ] {
         assert_eq!(
             eval(source, vars.clone()).unwrap(),
@@ -77,27 +78,54 @@ fn comparisons() {
 }
 
 #[test]
-fn and_and_or_return_an_operand() {
-    let vars = value!({ "a": 1, "b": 2, "s": "x", "n": null, "l": [1] });
+fn logic_is_on_booleans() {
+    let vars = value!({ "t": true, "f": false });
     for (source, value) in [
-        ("a && b", value!(2)),
-        ("0 && b", value!(0)),
-        ("a || b", value!(1)),
-        ("n || 'default'", value!("default")),
-        ("!a", value!(false)),
-        ("!n", value!(true)),
-        ("!!s", value!(true)),
-        ("l || 1", value!([1])),
-        ("!l", value!(false)),
+        ("t && f", false),
+        ("t && t", true),
+        ("f || t", true),
+        ("f || f", false),
+        ("!f", true),
+        ("!!t", true),
+        ("1 < 2 && 'a' == 'a'", true),
+    ] {
+        assert_eq!(
+            eval(source, vars.clone()).unwrap(),
+            value!(value),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn a_default_replaces_only_null() {
+    let vars = value!({ "n": null, "z": 0, "e": "", "f": false, "l": [] });
+    for (source, value) in [
+        ("n ?? 5", value!(5)),
+        ("z ?? 5", value!(0)),
+        ("e ?? 'x'", value!("")),
+        ("f ?? true", value!(false)),
+        ("l ?? 1", value!([])),
+        ("n ?? n ?? 'last'", value!("last")),
+        // The loosest operator: `??` applies to the whole comparison.
+        ("n ?? 1 < 2", value!(true)),
+        ("(n ?? 1) + 1", value!(2)),
     ] {
         assert_eq!(eval(source, vars.clone()).unwrap(), value, "{source}");
     }
 }
 
 #[test]
+fn a_default_skips_its_right_side_unless_needed() {
+    // `missing` would be undefined: it's never evaluated.
+    assert_eq!(eval("1 ?? missing", value!({})).unwrap(), value!(1));
+    assert_eq!(run(&Engine::new(), &x("1 ?? 2 + 3")).unwrap().steps, 3);
+}
+
+#[test]
 fn a_number_passed_through_keeps_its_exact_json_form() {
     let big = value!(u64::MAX);
-    assert_eq!(eval("n || 0", value!({ "n": big.clone() })).unwrap(), big);
+    assert_eq!(eval("n ?? 0", value!({ "n": big.clone() })).unwrap(), big);
     assert!(
         eval("n", value!({ "n": 1.0 }))
             .unwrap()
@@ -116,7 +144,10 @@ fn and_and_or_short_circuit() {
 #[test]
 fn literals_text_with_escapes_true_false_null() {
     assert_eq!(eval(r"'it\'s'", value!({})).unwrap(), value!("it's"));
-    assert_eq!(eval(r"'a\\b\n'", value!({})).unwrap(), value!(r"a\bn"));
+    assert_eq!(
+        eval(r"'a\\b\n\tc'", value!({})).unwrap(),
+        value!("a\\b\n\tc")
+    );
     assert_eq!(eval("''", value!({})).unwrap(), value!(""));
     assert_eq!(
         eval("'two\nlines'", value!({})).unwrap(),
@@ -166,10 +197,14 @@ fn an_undefined_variable_fails_at_its_expression_with_the_source() {
 
 #[test]
 fn type_errors() {
-    let vars = value!({ "s": "x", "n": null, "l": [1], "o": { "a": 1 } });
+    let vars = value!({ "s": "x", "n": null, "l": [1], "o": { "a": 1 }, "big": 1e308 });
     for (source, message) in [
         ("1 + 'a'", r#""+" needs numbers, got number and string"#),
         ("-s", r#""-" needs a number, got string"#),
+        ("!s", r#""!" needs a boolean, got string"#),
+        ("n && true", r#""&&" needs booleans, got null"#),
+        ("true && l", r#""&&" needs booleans, got list"#),
+        ("false || 1", r#""||" needs booleans, got number"#),
         (
             "'a' < 1",
             r#""<" needs two numbers or two texts, got string and number"#,
@@ -180,9 +215,11 @@ fn type_errors() {
         ),
         ("l == 1", r#""==" can't compare list and number"#),
         ("1 != o", r#""!=" can't compare number and object"#),
-        ("1 / 0", r#""/" gave Infinity (division by zero?)"#),
-        ("-1 / 0", r#""/" gave -Infinity (division by zero?)"#),
-        ("0 / 0", r#""/" gave NaN (division by zero?)"#),
+        ("1 / 0", r#""/" divided by zero"#),
+        ("-1 / 0", r#""/" divided by zero"#),
+        ("0 / 0", r#""/" divided by zero"#),
+        ("big * 10", r#""*" gave Infinity"#),
+        ("-big - big", r#""-" gave -Infinity"#),
         ("true + 1", r#""+" needs numbers, got boolean and number"#),
         (
             "l < o",
@@ -229,16 +266,20 @@ fn refuses_bad_syntax_at_compile_time() {
         ("1 +", "Expression ends too early"),
         ("", "Expected a non-empty string"),
         ("a b", r#"Unexpected "b""#),
-        ("1 2", "Unexpected 2"),
-        ("1 'a'", r#"Unexpected "a""#),
-        ("1 true", "Unexpected true"),
+        ("1 2", r#"Unexpected "2""#),
+        ("1 'a'", r#"Unexpected "'a'""#),
+        ("1 true", r#"Unexpected "true""#),
+        ("1 2.50", r#"Unexpected "2.50""#),
         ("(1 + 2", r#"Missing ")""#),
         ("1 + 2)", r#"Unexpected ")""#),
         ("1 < 2 < 3", "Comparisons can't be chained; use &&"),
         ("a = 1", r#"Unexpected "=""#),
         ("a @ b", r#"Unexpected "@""#),
-        ("'open", r#"Unexpected "'""#),
-        ("'bad\\\nescape'", r#"Unexpected "'""#),
+        ("'open", r#"Text has no closing "'""#),
+        ("'ends in \\", r#"Text has no closing "'""#),
+        (r"'a\q'", r#"Unknown escape "\q"; use \n, \t, \\ or \'"#),
+        ("'bad\\\nescape'", r#"Unknown escape "\\n"; use"#),
+        (&format!("1{}", "0".repeat(400)), "is too large"),
         ("*", r#"Unexpected "*""#),
         ("1.", r#"Unexpected ".""#),
         ("a & b", r#"Unexpected "&""#),

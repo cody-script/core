@@ -76,7 +76,7 @@ const RUN_CONFIGS: &[(&str, bool)] = &[
     ),
     // Not objects, unknown fields, limits (the host's), wrong types.
     ("[]", false),
-    (r#"{ "limits": { "maxSteps": 10 } }"#, false),
+    (r#"{ "limits": { "max_steps": 10 } }"#, false),
     (r#"{ "variables": [1] }"#, false),
     (r#"{ "breakpoints": { "tag": "fee" } }"#, false),
     (r#"{ "breakpoints": ["/do/1"] }"#, false),
