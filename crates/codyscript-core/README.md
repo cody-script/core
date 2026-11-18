@@ -509,6 +509,29 @@ Rust can't express:
 The program format is shared with the TypeScript package, so its history
 applies.
 
+### 0.6 → 0.7 (adds a debugger; one new error code)
+
+The program format, behaviour and messages are unchanged: every 0.6
+program runs as before, with the same results, steps and errors, and a run
+that isn't debugged never checks for a pause. What's new is
+[debugging](#debugging):
+
+- **`compiled.debug(options, breakpoints, debugger)`** (and
+  `debug_blocking`) runs a program under a debugger, which pauses it at
+  breakpoints and steps on (the [`debug`] module). `compiled.steps()` lists
+  what breakpoints can name, and `compiled.check(&config)` checks a run
+  configuration's breakpoints without running the program.
+- **`RunConfig`** holds a program's `variables` and `breakpoints`, kept
+  beside it. `codyscript-json` has its schema (`RUN_CONFIG_SCHEMA`).
+- **In JavaScript**, `debug`, `steps`, `check` and `runConfigSchema` do the
+  same (see `codyscript-wasm`).
+
+The one breaking change: **`ErrorCode` has a new variant, `InvalidConfig`**
+(`"invalid_config"`), for a breakpoint that names no step. A `match` on
+`ErrorCode` without a wildcard arm needs one for it. Only debugging and
+`check` return it; `run` never does. `Aborted` now also covers a run its
+debugger stopped (`Run stopped by the debugger`).
+
 ### 0.6.0 → 0.6.1 (additive)
 
 Faster and leaner, with the same format, behaviour, messages and error
