@@ -56,7 +56,7 @@ fn debug(
         actions.pop_front().unwrap_or(Continue)
     });
     let options = with_vars(variables);
-    let outcome = program.debug_blocking(options, at(breakpoints), debugger);
+    let outcome = program.run_blocking(options.with_debugger(at(breakpoints), debugger));
     (log, outcome)
 }
 
@@ -223,7 +223,7 @@ mod pausing {
             Continue
         });
         let error = straight()
-            .debug_blocking(RunOptions::new(), breakpoints, debugger)
+            .run_blocking(RunOptions::new().with_debugger(breakpoints, debugger))
             .unwrap_err();
         assert!(!paused, "it doesn't start");
         assert_eq!(error.code(), ErrorCode::InvalidConfig);
@@ -254,7 +254,7 @@ mod pausing {
             Continue
         });
         let error = straight()
-            .debug_blocking(RunOptions::new(), at(&["/do/0"]), debugger)
+            .run_blocking(RunOptions::new().with_debugger(at(&["/do/0"]), debugger))
             .unwrap_err();
         assert_eq!(error.code(), ErrorCode::InvalidConfig);
         assert_eq!(error.path(), "/breakpoints/1");
@@ -277,7 +277,7 @@ mod pausing {
             });
             let options = with_vars(value!({ "amount": 100 }));
             program
-                .debug_blocking(options, at_fee.clone(), debugger)
+                .run_blocking(options.with_debugger(at_fee.clone(), debugger))
                 .unwrap();
             paused
         };
@@ -305,7 +305,7 @@ mod pausing {
         });
         let breakpoints = [Breakpoint::tag("rule")];
         program
-            .debug_blocking(RunOptions::new(), breakpoints, debugger)
+            .run_blocking(RunOptions::new().with_debugger(breakpoints, debugger))
             .unwrap();
         assert_eq!(paused, ["/do/0", "/do/2/set/c"]);
     }
@@ -326,7 +326,7 @@ mod pausing {
             Continue
         });
         let options = with_vars(value!({ "n": 5 }));
-        let result = program.debug_blocking(options, at(&["/do/0", "/do/3"]), debugger);
+        let result = program.run_blocking(options.with_debugger(at(&["/do/0", "/do/3"]), debugger));
         assert_eq!(result.unwrap().value, 15);
         assert_eq!(hits, ["/do/0", "/do/2/do/0"]);
     }
@@ -353,7 +353,7 @@ mod pausing {
             StepInto
         });
         program
-            .debug_blocking(RunOptions::new(), at(&["/do/0"]), debugger)
+            .run_blocking(RunOptions::new().with_debugger(at(&["/do/0"]), debugger))
             .unwrap();
         let s = |s: &str| Some(s.to_owned());
         assert_eq!(
@@ -414,7 +414,7 @@ mod pausing {
         });
         let options = with_vars(value!({ "a": 100 }));
         program
-            .debug_blocking(options, at(&["/do/0"]), debugger)
+            .run_blocking(options.with_debugger(at(&["/do/0"]), debugger))
             .unwrap();
         assert_eq!(checked, 12);
     }
@@ -424,10 +424,8 @@ mod pausing {
         let engine = Engine::builder().max_steps(50).build();
         let spin = engine.compile(&m(vec![lp(value!(true), vec![])])).unwrap();
         let error = spin
-            .debug_blocking(
-                RunOptions::new(),
-                at(&["/do/0"]),
-                debug::from_fn(|_| Continue),
+            .run_blocking(
+                RunOptions::new().with_debugger(at(&["/do/0"]), debug::from_fn(|_| Continue)),
             )
             .unwrap_err();
         assert_eq!(error.code(), ErrorCode::StepLimit);
@@ -441,7 +439,7 @@ mod pausing {
             StepInto
         });
         let error = straight()
-            .debug_blocking(options, at(&["/do/0"]), debugger)
+            .run_blocking(options.with_debugger(at(&["/do/0"]), debugger))
             .unwrap_err();
         assert_eq!(error.code(), ErrorCode::Aborted);
         assert_eq!(error.message(), "Run aborted at /do/0");
@@ -571,7 +569,7 @@ mod stepping {
             StepInto
         });
         let options = with_vars(value!({ "a": 100 }));
-        let result = program.debug_blocking(options, at(&["/do/0"]), debugger);
+        let result = program.run_blocking(options.with_debugger(at(&["/do/0"]), debugger));
         assert_eq!(result.unwrap().value, 3);
         assert_eq!(
             frames,
@@ -639,7 +637,7 @@ mod stepping {
             }
         });
         let options = with_vars(value!({ "n": 3 }));
-        let result = program.debug_blocking(options, at(&["/fn/sum/do/1"]), debugger);
+        let result = program.run_blocking(options.with_debugger(at(&["/fn/sum/do/1"]), debugger));
         assert_eq!(result.unwrap().value, 6);
         assert_eq!(
             log,
@@ -727,7 +725,7 @@ mod debuggers {
         let mut patient = Patient { seen: Vec::new() };
         let options = with_vars(value!({ "n": 3 }));
         // By reference: the host keeps its debugger.
-        let result = sum_loop().debug_blocking(options, at(&["/do/0"]), &mut patient);
+        let result = sum_loop().run_blocking(options.with_debugger(at(&["/do/0"]), &mut patient));
         assert_eq!(result.unwrap().value, 6);
         assert_eq!(
             patient.seen,
@@ -738,7 +736,8 @@ mod debuggers {
     #[test]
     fn a_boxed_debugger_works_too() {
         let boxed: Box<dyn Debugger> = Box::new(debug::from_fn(|_| Continue));
-        let result = straight().debug_blocking(RunOptions::new(), at(&["/do/0"]), boxed);
+        let result =
+            straight().run_blocking(RunOptions::new().with_debugger(at(&["/do/0"]), boxed));
         assert!(result.is_ok());
     }
 
@@ -747,8 +746,26 @@ mod debuggers {
         fn send<T: Send>(_: &T) {}
         let program = straight();
         let debugger = debug::from_fn(|_| Continue);
-        let run = program.debug(RunOptions::new(), at(&["/do/0"]), debugger);
+        let run = program.run(RunOptions::new().with_debugger(at(&["/do/0"]), debugger));
         send(&run);
+    }
+
+    #[test]
+    fn a_program_run_once_is_debugged_too() {
+        let program = m(vec![set("a", value!(1)), ret(x("a + 1"))]);
+        let mut paused = Vec::new();
+        let debugger = debug::from_fn(|pause| {
+            paused.push(pause.step().path.to_owned());
+            Continue
+        });
+        let options = RunOptions::new().with_debugger(at(&["/do/1"]), debugger);
+        let result = Engine::new().run_blocking(&program, options).unwrap();
+        assert_eq!(result.value, 2);
+        assert_eq!(paused, ["/do/1"]);
+
+        let options = RunOptions::new().with_debugger(at(&["/do/9"]), debug::from_fn(|_| Continue));
+        let error = Engine::new().run_blocking(&program, options).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InvalidConfig);
     }
 }
 

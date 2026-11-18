@@ -106,12 +106,9 @@ fn debug(c: &mut Criterion) {
     let mut group = c.benchmark_group("debug");
     let sum = scenario::compile(&engine, &scenario::sum_loop());
     let debugged = || {
-        let options = scenario::options(scenario::n(1_000));
-        sum.debug_blocking(
-            options,
-            scenario::at_the_end(&sum),
-            scenario::passing_debugger(),
-        )
+        let options = scenario::options(scenario::n(1_000))
+            .with_debugger(scenario::at_the_end(&sum), scenario::passing_debugger());
+        sum.run_blocking(options)
     };
     // A run that fails (a breakpoint naming no step, say) would be quick.
     assert_eq!(debugged().unwrap().steps, scenario::sum_loop_steps(1_000));

@@ -1,6 +1,6 @@
 //! Debugging a run: pausing at breakpoints, looking at the variables, and
-//! going on a step at a time. See
-//! [`CompiledProgram::debug`](crate::CompiledProgram::debug).
+//! going on a step at a time. A run is debugged when its options have a
+//! debugger: see [`RunOptions::with_debugger`](crate::RunOptions::with_debugger).
 //!
 //! A **step** is a node of the program: an instruction (`set`, `ret`, `if`,
 //! `for`) or an input (a literal, `val`, `ref`, `x`, `call`, `do`) — what
@@ -233,7 +233,8 @@ pub struct FnDebugger<F>(F);
 ///     Action::Continue
 /// });
 /// let breakpoints = [Breakpoint::path("/do/2")];
-/// let result = program.debug_blocking(RunOptions::new(), breakpoints, debugger).unwrap();
+/// let options = RunOptions::new().with_debugger(breakpoints, debugger);
+/// let result = program.run_blocking(options).unwrap();
 /// assert_eq!(result.value, 3);
 /// assert_eq!(seen, [("/do/2".to_owned(), Some(value!(2)))]);
 /// ```
@@ -387,7 +388,7 @@ impl<'a> Pause<'a> {
 /// where stepping is to pause it next. The run asks it, before each step,
 /// whether to go on.
 pub(crate) struct Session<'p, 'd> {
-    debugger: &'d mut dyn Debugger,
+    debugger: Box<dyn Debugger + 'd>,
     breakpoints: Vec<Breakpoint>,
     stepping: Stepping<'p>,
     /// The program's steps, for pauses to show and breakpoints to name.
@@ -412,7 +413,7 @@ impl<'p, 'd> Session<'p, 'd> {
     pub fn new(
         program: &'p Program,
         breakpoints: Vec<Breakpoint>,
-        debugger: &'d mut dyn Debugger,
+        debugger: Box<dyn Debugger + 'd>,
     ) -> Result<Self, Error> {
         let steps = steps(program);
         check(&steps, &breakpoints)?;

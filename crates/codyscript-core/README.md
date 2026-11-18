@@ -246,12 +246,12 @@ engine.compile_owned(program) -> Result<CompiledProgram, Error>  // keeps it, no
 engine.run(&program, options).await -> Result<RunResult, Error>   // compile + run once
 engine.run_blocking(&program, options) -> Result<RunResult, Error>
 compiled.run(options).await / compiled.run_blocking(options)
-compiled.debug(options, breakpoints, debugger).await   // and debug_blocking
 compiled.steps() -> Vec<debug::Step>                       // what breakpoints name
 compiled.check(&run_config) -> Result<(), Error>           // its breakpoints name steps?
 compiled.program() -> &Value
 
 RunOptions::new().with_variables(map).with_signal(signal)  // or RunOptions::from(map)
+    .with_debugger(breakpoints, debugger)                   // to debug the run
 RunResult { value: Value, variables: Map, steps: u64 }
 ```
 
@@ -363,12 +363,16 @@ steps on. It's all in the [`debug`] module.
   Either field may be left out; any other is refused. It holds no limits:
   those are the host's, for where it runs. `compiled.check(&config)` checks
   its breakpoints against the program, without running it.
-- **`compiled.debug(options, breakpoints, debugger)`** runs the program,
-  pausing before each step a breakpoint names, and then wherever the
-  debugger's actions take it — nowhere else: not at the start, not at the
-  end, and with no breakpoints, never. (Its options and breakpoints usually
-  come from a `RunConfig`: `RunOptions::from(config.variables)`,
-  `config.breakpoints`.) It checks the breakpoints first. At each pause the
+- **A debugged run** is any run whose options have a debugger:
+  `RunOptions::new().with_debugger(breakpoints, debugger)`, then `run` (or
+  `run_blocking`, or `engine.run`) as usual. It pauses before each step a
+  breakpoint names, and then wherever the debugger's actions take it —
+  nowhere else: not at the start, not at the end, and with no breakpoints,
+  never. (Its variables and breakpoints usually come from a `RunConfig`:
+  `RunOptions::from(config.variables).with_debugger(config.breakpoints,
+  debugger)`.) It checks the breakpoints first. The debugger may borrow
+  (a closure that records its pauses in a local), for as long as the
+  options live. At each pause the
   debugger gets a `Pause`: the step (`step()`, as `steps()` lists it) and
   why it paused (`Breakpoint` or `Step`), the steps taken, the variables as
   that step sees them (`scopes()`, `variable(name)`), the call stack
@@ -425,11 +429,12 @@ let debugger = debug::from_fn(|pause| {
     seen.push((pause.step().path.to_owned(), function.map(str::to_owned), fee));
     Action::StepOver
 });
-let options = RunOptions::from(value!({ "Amount": 20000 }).into_object().unwrap());
 // A breakpoint inside the function, before its `if`: by its tag, which
 // edits to the program won't move.
 let breakpoints = [Breakpoint::tag("cap")];
-let result = program.debug_blocking(options, breakpoints, debugger).unwrap();
+let options = RunOptions::from(value!({ "Amount": 20000 }).into_object().unwrap())
+    .with_debugger(breakpoints, debugger);
+let result = program.run_blocking(options).unwrap();
 assert_eq!(result.value, 20300);
 assert_eq!(seen, [
     // In `fee`, which has worked out 600…
@@ -508,6 +513,33 @@ Rust can't express:
 
 The program format is shared with the TypeScript package, so its history
 applies.
+
+### 0.7 → 0.8 (one way to run; API only)
+
+The program format, behaviour, messages and error codes are unchanged:
+every 0.7 program runs as before. Only the Rust API changed — **a
+debugger is now a run option**, so every run, debugged or not, goes
+through `run`:
+
+| 0.7 | 0.8 |
+|---|---|
+| `compiled.debug(options, breakpoints, debugger).await` | `compiled.run(options.with_debugger(breakpoints, debugger)).await` |
+| `compiled.debug_blocking(options, breakpoints, debugger)` | `compiled.run_blocking(options.with_debugger(breakpoints, debugger))` |
+
+`engine.run` and `engine.run_blocking` take a debugger the same way. A run
+without one still pays nothing for debugging: which loop runs is decided
+once, as the run starts.
+
+**`RunOptions` has a lifetime, `RunOptions<'d>`**: its debugger's, which may
+borrow. Elided (`RunOptions<'_>`) or inferred almost everywhere; a function
+that makes options for its caller is generic over it (`fn options<'d>(…) ->
+RunOptions<'d>`), leaving the caller free to add any debugger. It
+is no longer `Clone` (a debugger can't be cloned): build the options again
+for each run instead, as their variables are moved into the run anyway.
+Its `variables` and `signal` are still public fields, but it now has
+private ones too, so it can't be built with a struct literal; use
+`RunOptions::new()` or `RunOptions::from(variables)` and the `with_…`
+methods.
 
 ### 0.6 → 0.7 (adds a debugger; one new error code)
 

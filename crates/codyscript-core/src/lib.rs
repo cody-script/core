@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod block_on;
 mod config;
 pub mod debug;
 mod engine;

@@ -47,7 +47,7 @@ const RESERVED: [&str; 3] = ["__proto__", "prototype", "constructor"];
 
 /// Escapes one JSON Pointer (RFC 6901) reference token. Most keys need no
 /// escaping, and aren't copied.
-pub(crate) fn escape_key(key: &str) -> Cow<'_, str> {
+fn escape_key(key: &str) -> Cow<'_, str> {
     if key.contains(['~', '/']) {
         Cow::Owned(key.replace('~', "~0").replace('/', "~1"))
     } else {
@@ -59,7 +59,7 @@ pub(crate) fn escape_key(key: &str) -> Cow<'_, str> {
 // their length.
 
 /// The JSON Pointer `path` extended by `key`.
-pub(crate) fn child(path: &str, key: &str) -> String {
+fn child(path: &str, key: &str) -> String {
     let key = escape_key(key);
     let mut pointer = String::with_capacity(path.len() + 1 + key.len());
     pointer.push_str(path);
@@ -78,7 +78,7 @@ fn child_at(path: &str, i: usize) -> String {
 
 /// JSON Pointer for a list of keys.
 #[cfg(test)]
-pub(crate) fn pointer(keys: &[&str]) -> String {
+fn pointer(keys: &[&str]) -> String {
     keys.iter()
         .fold(String::new(), |path, key| child(&path, key))
 }

@@ -32,23 +32,32 @@ use crate::program::{
 };
 use crate::value::{Map, Value};
 
-/// Runs `program`'s body to completion; in a debugging session, pausing
-/// where it says.
-pub(crate) async fn run<'p>(
-    program: &'p Program,
+/// Runs `program`'s body to completion; with a debugger, pausing where it
+/// says.
+pub(crate) async fn run(
+    program: &Program,
     limits: Limits,
-    options: RunOptions,
-    debug: Option<Session<'p, '_>>,
+    options: RunOptions<'_>,
 ) -> Result<RunResult, Error> {
+    let RunOptions {
+        variables,
+        signal,
+        breakpoints,
+        debugger,
+    } = options;
+    let debug = match debugger {
+        Some(debugger) => Some(Session::new(program, breakpoints, debugger)?),
+        None => None,
+    };
     let mut machine = Machine {
         functions: &program.functions,
         meter: Meter {
             steps: 0,
             max_steps: limits.max_steps,
-            signal: options.signal,
+            signal,
         },
         max_depth: limits.max_depth,
-        scopes: vec![options.variables],
+        scopes: vec![variables],
         base: 0,
         invocations: Vec::new(),
         tasks: Vec::new(),
@@ -72,6 +81,7 @@ pub(crate) async fn run<'p>(
 }
 
 /// What's left to do. Tasks that need a value find it on the value stack.
+#[derive(Debug)]
 enum Task<'p> {
     /// Produce this input's value.
     Resolve(&'p Input),
@@ -81,7 +91,7 @@ enum Task<'p> {
     /// execute an instruction at once.
     Execute(&'p Instruction),
     /// Call the external function with the arguments on the value stack.
-    Call(&'p External, &'p Input),
+    External(&'p External, &'p Input),
     /// Run the function with the arguments on the value stack as its
     /// variables.
     Invoke(&'p Call, &'p Input),
@@ -119,6 +129,7 @@ impl<'p> Task<'p> {
 }
 
 /// A CodyScript function running: a frame of the call stack.
+#[derive(Debug)]
 struct Invocation<'p> {
     /// The `call` running it.
     call: &'p Input,
@@ -177,8 +188,8 @@ impl<'p> Machine<'p, '_> {
     /// twice, so that only a debugged run has the chance to pause.
     async fn drive<const DEBUGGED: bool>(&mut self) -> Result<(), Error> {
         while let Some(task) = self.tasks.pop() {
-            if let Task::Call(operation, node) = task {
-                let value = self.call(operation, node).await?;
+            if let Task::External(external, node) = task {
+                let value = self.call_external(external, node).await?;
                 self.values.push(value);
             } else if DEBUGGED {
                 self.debug_task(task).await?;
@@ -250,7 +261,7 @@ impl<'p> Machine<'p, '_> {
                 self.invocations.pop();
                 self.base = self.invocations.last().map_or(0, |i| i.base);
             }
-            Task::Call(..) => unreachable!("calls are awaited by drive()"),
+            Task::External(..) => unreachable!("external calls are awaited by drive()"),
         }
         Ok(())
     }
@@ -277,7 +288,7 @@ impl<'p> Machine<'p, '_> {
             InputKind::External(external) => {
                 // Arguments resolve one at a time, in order: the first
                 // pushed last, so it runs first.
-                self.tasks.push(Task::Call(external, input));
+                self.tasks.push(Task::External(external, input));
                 for (_, argument) in external.args.iter().rev() {
                     self.tasks.push(Task::Resolve(argument));
                 }
@@ -426,7 +437,9 @@ impl<'p> Machine<'p, '_> {
         map
     }
 
-    async fn call(&mut self, external: &External, node: &Input) -> Result<Value, Error> {
+    /// Calls an external function — the host's — with the arguments on the
+    /// value stack.
+    async fn call_external(&mut self, external: &External, node: &Input) -> Result<Value, Error> {
         let tag = node.tag.as_deref();
         let call = ExecutorCall {
             op: external.op().to_owned(),
