@@ -13,7 +13,7 @@ use crate::error::{Details, Error, ErrorCode, Issue};
 use crate::executor::Executor;
 use crate::expression::{Ast, parse};
 use crate::program::{
-    Call, Expression, External, Input, InputKind, Instruction, InstructionKind, Program,
+    Call, Expression, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
 };
 use crate::value::{Map, Value};
 
@@ -101,17 +101,17 @@ fn may_fail(v: &Value) -> bool {
     }
 }
 
-/// An external function a program declares: its executor id, its name
-/// within it, and the executor that provides it (`None` if the engine
-/// doesn't, which is already an issue).
-type Declared = (String, String, Option<Arc<dyn Executor>>);
+/// An external function a program declares: where its full name's first
+/// dot is, and the executor that provides it (`None` if the engine doesn't,
+/// which is already an issue).
+type Declared = (usize, Option<Arc<dyn Executor>>);
 
 /// What a call's name refers to.
 enum Target {
     /// One of the program's functions, by index.
     Function(usize),
-    /// An external function the program declares.
-    External(Declared),
+    /// An external function the program declares, by its full name.
+    External(String, Declared),
 }
 
 struct RawIssue {
@@ -434,8 +434,7 @@ impl Walk<'_> {
                         tag: None,
                     });
                 }
-                self.externals
-                    .insert(name, (exe.clone(), op.to_owned(), executor));
+                self.externals.insert(name, (exe.len(), executor));
             }
         }
     }
@@ -463,13 +462,16 @@ impl Walk<'_> {
 
     /// Every function in `fn`, each a program of its own, in order; `None`
     /// if any is invalid (each is checked, even after one fails).
-    fn function_bodies(&mut self, table: &Map) -> Option<Vec<Input>> {
+    fn function_bodies(&mut self, table: &Map) -> Option<Vec<Function>> {
         let path = child("", FUNCTIONS);
         let mut functions = Some(Vec::with_capacity(table.len()));
         for (name, body) in table {
             let body = self.input(body, child(&path, name), 2);
             match (body, functions.as_mut()) {
-                (Some(body), Some(list)) => list.push(body),
+                (Some(body), Some(list)) => list.push(Function {
+                    name: name.clone(),
+                    body,
+                }),
                 _ => functions = None,
             }
         }
@@ -568,12 +570,12 @@ impl Walk<'_> {
         }
         Some(match call? {
             (Target::Function(function), args) => InputKind::Call(Call { function, args }),
-            (Target::External((exe, op, executor)), args) => {
+            (Target::External(name, (dot, executor)), args) => {
                 InputKind::External(Box::new(External {
                     // An unknown function is already an issue.
                     executor: executor?,
-                    exe,
-                    op,
+                    name,
+                    dot,
                     args,
                     arg: arg.cloned(),
                 }))
@@ -588,7 +590,7 @@ impl Walk<'_> {
             return Some(Target::Function(index));
         }
         if let Some(declared) = self.externals.get(name) {
-            return Some(Target::External(declared.clone()));
+            return Some(Target::External(name.to_owned(), declared.clone()));
         }
         // Most likely a host function the program forgot to declare.
         let provided = name

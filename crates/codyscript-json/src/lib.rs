@@ -21,6 +21,15 @@ pub use serde_json;
 /// numbers are finite.
 pub const SCHEMA: &str = include_str!("../schema.json");
 
+/// A JSON Schema (draft 2020-12) for [run configurations]: a program's
+/// variables and breakpoints, kept beside it, for IDEs to write and check.
+/// It checks shape and that breakpoint paths are JSON Pointers;
+/// [`CompiledProgram::check`] also checks that each breakpoint names a step
+/// of its program.
+///
+/// [run configurations]: codyscript_core::RunConfig
+pub const RUN_CONFIG_SCHEMA: &str = include_str!("../run-config.schema.json");
+
 // ── Reading ─────────────────────────────────────────────────────────────────
 
 /// Parses JSON text: a program or any other [`Value`], or [`Variables`]

@@ -43,7 +43,16 @@ crates/
                      #   place the core meets data formats
       engine.rs      # Engine, EngineBuilder, CompiledProgram (the public API)
       run.rs         # The interpreter: one loop over explicit stacks;
-                     #   a function call is a frame on them, not recursion
+                     #   a function call is a frame on them, not recursion.
+                     #   The loop is built twice (drive::<DEBUGGED>): only
+                     #   a debugged run's may pause before a step
+      config.rs      # RunConfig: variables and breakpoints, beside a program
+      debug.rs       # Debugging (pub mod debug): Debugger, Action, Pause
+                     #   (what a paused run shows), Frame, Breakpoint (by
+                     #   tag or path) and checking them, the step list
+                     #   (CompiledProgram::steps); Session, which decides
+                     #   before each step whether a run pauses, pauses it,
+                     #   and says whether it goes on
       validate.rs    # One walk: shape, finite numbers, depth, reserved keys,
                      #   root-only `fn`/`ext`, what each call names, the
                      #   host's functions, expression syntax; builds the tree
@@ -58,17 +67,22 @@ crates/
       common/mod.rs  # Builders, the `math` executor, valid/invalid fixtures
                      #   (shared with codyscript-json's tests via #[path])
       engine.rs, validate.rs, expression.rs  # ports of the TypeScript tests
+      debug.rs       # pausing, stepping, breakpoints, the step list
       data.rs        # format independence: serde tokens, CBOR end to end
   codyscript-json/   # The JSON adapter. Depends on core + serde_json.
     src/lib.rs       # from_str/to_string…, EngineJsonExt::compile_json,
-                     #   serde_json interop, SCHEMA; runs README.md's doc tests
+                     #   serde_json interop, SCHEMA, RUN_CONFIG_SCHEMA; runs
+                     #   README.md's doc tests
     schema.json      # JSON Schema for hand-writing programs
+    run-config.schema.json  # JSON Schema for run configurations (IDEs)
     tests/           # json.rs (conventions), schema.rs, readme.rs
   codyscript-wasm/   # WebAssembly bindings (wasm-bindgen); not published.
     src/lib.rs       # compile(program, executors, limits) → Program, and
                      #   run(program, variables, executors, limits), for
                      #   JavaScript; executors are objects of JavaScript
-                     #   functions ({ text: { trim } }), bridged via send_wrapper
+                     #   functions ({ text: { trim } }), bridged via send_wrapper;
+                     #   debug(program, config, …, onPause), steps(…),
+                     #   check(…) and runConfigSchema() for debugging
     tests/web.rs     # wasm-bindgen-test: Node by default, browsers too
     npm/             # the npm package @cody-script/core-wasm: build.sh,
                      #   package.json template, README, smoke.mjs (Node)
@@ -76,8 +90,12 @@ crates/
     src/main.rs      # what it's for, arguments, startup
     src/wasm.rs      # builds codyscript-wasm (cargo) + its glue (in memory)
     src/server.rs    # serves page, checklist and module (axum)
-    src/cases.rs     # the checklist, in Rust: add cases here
-    src/index.html   # the page: demo executors, run, compare, show
+    src/cases.rs     # the checklist, in Rust: add cases here (a case may
+                     #   script a debugger — actions, and the pauses it
+                     #   must make — for its run configuration's breakpoints;
+                     #   `expect` is only the outcome)
+    src/index.html   # the page: demo executors, run, compare, show;
+                     #   the debugger (steps, breakpoints, stack, variables)
   codyscript-bench/  # Benchmarks; not published.
     src/lib.rs       # the scenarios every benchmark shares
     src/alloc.rs     # a counting global allocator, for memory
@@ -119,6 +137,13 @@ closures already work with `async_executor`.
   `program.rs`, a case in the engine with a `step()` per evaluation, a
   definition in `codyscript-json/schema.json`, and cases in the core's
   `tests/common/mod.rs` (run against both the validator and the schema).
+  For the debugger, it also needs a `NodeKind` (and `Node::kind`/`name` in
+  `debug.rs`) and its parts in `push_parts`, in the order they run; a node
+  is a step a debugger can pause at only if a `Task::Resolve`/`Execute`
+  runs it (`Task::step`). A plain run executes a list's first instruction
+  and resolves an instruction's input at once; a debugged run pushes them
+  as those tasks instead (`list`/`execute::<DEBUGGED>`) — keep any new
+  shortcut like that behind `DEBUGGED`.
 - **No stack overflows from programs.** Running never recurses: `run.rs` is
   one loop over explicit stacks (tasks, values, block results, scopes), and
   expressions are a flat arena evaluated the same way. Only compiling
@@ -127,6 +152,23 @@ closures already work with `async_executor`.
   descended. Don't add recursion over anything a program controls.
   `tests/engine.rs` runs the deepest default-limit programs on a 1 MiB
   stack (WebAssembly's), and `codyscript-wasm` checks it under wasm32.
+  Listing a program's steps (`debug::steps`) walks an explicit stack too.
+- **Debugging costs plain runs nothing.** `drive` is generic over
+  `DEBUGGED`, so the loop of a run that isn't debugged is compiled without
+  the pause; keep anything a pause holds across an `.await` inside
+  `debug_task`, not `drive`, or every run pays to keep it. Pausing —
+  whether, the `Pause`, the debugger, what its action means — is
+  `Session::before`'s business (in `debug.rs`), not the loop's; the loop
+  only asks it, before each step, whether to go on. Anything else the
+  debugger needs is state a run keeps anyway (the `invocations` call
+  stack). Debugged runs may be slower — a `Pause` is built fresh, as plain
+  data, and the session indexes the program's steps when it starts — but
+  plain runs may not. A run pauses only at breakpoints and where its debugger's actions
+  take it — never of its own accord. A debugged run must behave
+  exactly as a plain one between pauses — same result, steps, errors — and
+  a `Pause` is read-only. Timings vary too much on shared machines to show
+  a few percent: compare instruction counts (Valgrind's cachegrind) before
+  and after touching the loop.
 - **Everything called is a function.** The root node — any input — may
   carry `fn` (CodyScript functions, each a program itself) and `ext` (the
   host's functions it uses, by executor: `{ "text": ["trim"] }`); both
@@ -149,7 +191,8 @@ closures already work with `async_executor`.
   `wasm-bindgen-cli-support` are pinned together in the workspace.
 - **The playground stays small and mostly Rust.** Checks go in `cases.rs`
   (Rust data); the page's JavaScript only defines the demo executors, runs,
-  compares and renders.
+  compares and renders — and drives the debugger, whose steps come from the
+  engine (`steps`), not from walking the program in JavaScript.
 - **Benchmarks share their scenarios** (`codyscript-bench/src/lib.rs`) and
   WebAssembly benchmark names match native ones, so results compare line by
   line. Memory benchmarks borrow the scenario (`measure(&scenario)`):
@@ -159,6 +202,14 @@ closures already work with `async_executor`.
   and stored rules. Messages, paths and issue order match it exactly (a
   differential fuzz against the TypeScript engine found no differences);
   change them only together, with a version bump and an upgrade note.
+- **Run configurations are a format too**, for IDEs: a program's
+  `variables` and `breakpoints`, kept apart from it. `RunConfig`'s serde
+  impls and `run-config.schema.json` accept and refuse the same documents
+  (`codyscript-json/tests/schema.rs`; hence `RunConfig`'s hand-written
+  `Deserialize`, which takes objects only). It holds no limits — those are
+  the host's. A breakpoint names steps by `tag` (preferred: edits don't
+  move it) or `path`, and one that names no step is an `invalid_config`
+  error, whenever breakpoints are set — never silently ignored.
 - **Values are format-neutral.** `Number` holds any `f64` (formats like CBOR
   carry `NaN`); `compile` refuses non-finite numbers in programs. `Map`
   keeps insertion order — it decides argument order — and compares

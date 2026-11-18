@@ -81,6 +81,80 @@ fn results_and_errors_are_written_as_json() {
 }
 
 #[test]
+fn pauses_steps_and_actions_are_written_as_json() {
+    use codyscript_core::debug::{self, Action, Breakpoint};
+    let program = engine()
+        .compile(&with_fn(
+            m(vec![
+                set("a", value!(1)),
+                tagged(set("b", call("twice", value!({ "v": var("a") }))), "t"),
+            ]),
+            [("twice", m(vec![ret(x("v * 2"))]))],
+        ))
+        .unwrap();
+    let mut pauses = Vec::new();
+    let debugger = debug::from_fn(|pause| {
+        pauses.push(to_string(&*pause).unwrap());
+        if pause.step().path == "/do/0" {
+            pause
+                .breakpoints_mut()
+                .push(Breakpoint::path("/fn/twice/do/0/ret"));
+            Action::StepInto
+        } else {
+            Action::Continue
+        }
+    });
+    program
+        .debug_blocking(RunOptions::new(), [Breakpoint::path("/do/0")], debugger)
+        .unwrap();
+    assert_eq!(
+        pauses,
+        [
+            r#"{"reason":"breakpoint","path":"/do/0","kind":"set","name":"a","depth":0,"steps":0,"frames":[{"scopes":[{}]}],"breakpoints":[{"path":"/do/0"}]}"#,
+            r#"{"reason":"step","path":"/do/0/set/a","kind":"val","depth":1,"steps":1,"frames":[{"scopes":[{}]}],"breakpoints":[{"path":"/do/0"},{"path":"/fn/twice/do/0/ret"}]}"#,
+            r#"{"reason":"breakpoint","path":"/fn/twice/do/0/ret","kind":"x","name":"v * 2","function":"twice","depth":1,"steps":6,"frames":[{"scopes":[{"a":1}]},{"function":"twice","call":"/do/1/set/b","scopes":[{"v":1}]}],"breakpoints":[{"path":"/do/0"},{"path":"/fn/twice/do/0/ret"}]}"#,
+        ]
+    );
+    let steps = to_string(&program.steps()).unwrap();
+    assert!(steps.starts_with(
+        r#"[{"path":"/do/0","kind":"set","name":"a","depth":0},{"path":"/do/0/set/a","kind":"val","depth":1},{"path":"/do/1","kind":"set","name":"b","tag":"t","depth":0},"#
+    ));
+    assert!(steps.ends_with(
+        r#"{"path":"/fn/twice/do/0","kind":"ret","function":"twice","depth":0},{"path":"/fn/twice/do/0/ret","kind":"x","name":"v * 2","function":"twice","depth":1}]"#
+    ));
+    let actions: Vec<Action> = from_str(r#"["stepOver","stepInto","continue","stop"]"#).unwrap();
+    assert_eq!(
+        actions,
+        [
+            Action::StepOver,
+            Action::StepInto,
+            Action::Continue,
+            Action::Stop
+        ]
+    );
+}
+
+#[test]
+fn run_configurations_are_read_and_written_as_json() {
+    use codyscript_core::RunConfig;
+    use codyscript_core::debug::Breakpoint;
+    let text = r#"{"variables":{"amount":200},"breakpoints":[{"tag":"fee"},{"path":"/do/1"}]}"#;
+    let config: RunConfig = from_str(text).unwrap();
+    assert_eq!(config.variables, vars(value!({ "amount": 200 })));
+    assert_eq!(
+        config.breakpoints,
+        [Breakpoint::tag("fee"), Breakpoint::path("/do/1")]
+    );
+    assert_eq!(to_string(&config).unwrap(), text);
+    assert_eq!(from_str::<RunConfig>("{}").unwrap(), RunConfig::default());
+    let typo = from_str::<RunConfig>(r#"{ "breakpoint": [] }"#).unwrap_err();
+    assert!(
+        typo.to_string().starts_with("unknown field `breakpoint`"),
+        "{typo}"
+    );
+}
+
+#[test]
 fn compile_json_compiles_and_reports_syntax_errors_as_invalid_programs() {
     let engine = engine();
     let compiled = engine.compile_json(r#"{ "x": "1 + 2" }"#).unwrap();

@@ -9,7 +9,7 @@
 //! On start it compiles `codyscript-wasm` to WebAssembly and generates its
 //! JavaScript glue ([`wasm`]), then serves, from memory ([`server`]):
 //!
-//! - `/` — the page (`index.html`): edit and run a program, or
+//! - `/` — the page (`index.html`): edit, run and debug a program, or
 //!   click **Run all** to run the checklist; every case should pass;
 //! - `/cases.json` — the checklist ([`cases`]): programs and the outcomes to
 //!   expect, written in Rust;

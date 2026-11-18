@@ -8,12 +8,27 @@
   header { grid-column: 1 / -1; }
   h1 { font-size: 1.1rem; margin: 0 0 .75rem; } h1 small { font-weight: normal; color: #666; }
   label { display: block; margin: .6rem 0 .2rem; font-size: .8rem; font-weight: 600; color: #555; }
-  textarea, pre { box-sizing: border-box; width: 100%; font: 12px/1.4 ui-monospace, monospace; border: 1px solid #ccc; border-radius: 4px; padding: .4rem; margin: 0; }
-  textarea { resize: vertical; } #program { height: 20rem; } #variables, #limits { height: 2.4rem; }
+  label small { font-weight: normal; }
+  textarea, pre, .box { box-sizing: border-box; width: 100%; font: 12px/1.4 ui-monospace, monospace; border: 1px solid #ccc; border-radius: 4px; padding: .4rem; margin: 0; }
+  textarea { resize: vertical; } #program { height: 20rem; } #config { height: 7rem; } #limits { height: 2.4rem; }
+  textarea[readonly] { background: #f4f4f4; }
   pre { background: #fafafa; white-space: pre-wrap; word-break: break-all; max-height: 16rem; overflow: auto; }
   button, select { font: inherit; margin-top: .6rem; }
   .pass { color: #137333; } .fail { color: #b3261e; }
   table { border-collapse: collapse; width: 100%; } td { padding: .15rem .4rem; border-top: 1px solid #eee; }
+  /* Steps: click one to toggle its breakpoint. */
+  #steps { max-height: 16rem; overflow: auto; padding: .2rem 0; }
+  .step { cursor: pointer; white-space: nowrap; padding: 0 .4rem; }
+  .step:hover { background: #f1f3f4; }
+  .step .dot { display: inline-block; width: 1em; color: transparent; }
+  .step:hover .dot { color: #f3b7b2; } .step.bp .dot { color: #d93025; }
+  .step.current { background: #fff3c4; }
+  .fn { padding: .3rem .4rem 0 1.4em; font-weight: 600; color: #555; }
+  .step small, #stack small { color: #888; }
+  #debugger[hidden] { display: none; }
+  #check { margin-top: .2rem; }
+  #stack { list-style: none; padding: 0; margin: 0; }
+  #stack li { cursor: pointer; padding: 0 .4rem; } #stack li.selected { background: #e8f0fe; }
 </style>
 </head>
 <body>
@@ -21,17 +36,31 @@
 <section>
   <select id="case"></select>
   <label for="program">Program</label><textarea id="program" spellcheck="false"></textarea>
-  <label for="variables">Variables</label><textarea id="variables" spellcheck="false"></textarea>
+  <label for="config">Run configuration <small>— variables and breakpoints, kept apart from the program</small></label><textarea id="config" spellcheck="false"></textarea>
   <label for="limits">Limits</label><textarea id="limits" spellcheck="false"></textarea>
-  <button id="run" disabled>Run</button> <button id="all" disabled>Run all</button> <span id="verdict"></span>
+  <button id="run" disabled>Run</button> <button id="all" disabled>Run all</button>
+  <button id="debug" disabled title="Run, pausing at the breakpoints">Debug</button>
+  <span id="verdict"></span>
+  <label>Steps <small>— click one to set or clear its breakpoint (by its tag, if it has one): Debug pauses only there</small></label><div id="steps" class="box"></div>
+  <div id="check" class="fail"></div>
 </section>
 <section>
+  <div id="debugger" hidden>
+    <label>Debugger</label>
+    <div id="where"></div>
+    <button id="stepOver" title="Take this step, and all it calls">Step over</button>
+    <button id="stepInto" title="Pause at the very next step, inside this one or the function it calls">Step into</button>
+    <button id="continue" title="Run to the next breakpoint">Continue</button>
+    <button id="stop" title="End the run here">Stop</button>
+    <label>Call stack <small>— click a frame to see its variables</small></label><ul id="stack" class="box"></ul>
+    <label>Variables <small>— innermost scope first</small></label><pre id="scopes"></pre>
+  </div>
   <label>Outcome</label><pre id="outcome"></pre>
   <label>Expected (the outcome must contain this)</label><pre id="expect"></pre>
   <label>Checklist</label><table id="results"></table>
 </section>
 <script type="module">
-import init, { run, version } from "/pkg/codyscript_wasm.js";
+import init, { run, debug, steps, check, version } from "/pkg/codyscript_wasm.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -50,7 +79,28 @@ function executors() {
   };
 }
 
-const execute = async (c) => JSON.parse(await run(c.program, c.variables, executors(), c.limits));
+// A case with a `debug` script runs under a debugger that pauses at its
+// breakpoints and answers each pause with its next action, noting where it
+// paused, and why.
+async function scripted(c) {
+  const actions = [...c.debug.actions], pauses = [];
+  const outcome = JSON.parse(await debug(c.program, c.config, executors(), c.limits, (pause) => {
+    pauses.push({ path: pause.path, reason: pause.reason });
+    return actions.shift() ?? "continue";
+  }));
+  return { outcome, pauses };
+}
+
+// Pauses, for people: "/do/2 (breakpoint), /do/3 (step)".
+const listed = (pauses) => pauses.map((p) => `${p.path || "(root)"} (${p.reason})`).join(", ") || "nowhere";
+
+// Runs a case: its outcome, and where a scripted debugger paused, if any.
+// A plain run takes only the configuration's variables.
+const execute = async (c) => {
+  if (c.debug) return scripted(c);
+  const variables = JSON.stringify(JSON.parse(c.config || "{}").variables ?? {});
+  return { outcome: JSON.parse(await run(c.program, variables, executors(), c.limits)) };
+};
 
 // Does `actual` contain everything in `expected`?
 const contains = (actual, expected) =>
@@ -58,48 +108,232 @@ const contains = (actual, expected) =>
     ? Object.entries(expected).every(([key, value]) => contains(actual?.[key], value))
     : JSON.stringify(actual) === JSON.stringify(expected);
 
+// What's wrong with a case's result, if anything: its outcome, or (for a
+// scripted debugger) where it paused.
+function problem(c, { outcome, pauses }) {
+  if (!contains(outcome, c.expect)) return `got ${JSON.stringify(outcome).slice(0, 300)}`;
+  if (pauses && JSON.stringify(pauses) !== JSON.stringify(c.debug.pauses)) return `paused at ${listed(pauses)}`;
+  return null;
+}
+
 const cases = await (await fetch("/cases.json")).json();
 await init({ module_or_path: "/pkg/codyscript_wasm_bg.wasm" });
 $("status").textContent = `codyscript-wasm ${version()}, ${cases.length} cases`;
 
+const FIELDS = ["program", "config", "limits"];
+const edited = () => ({ ...cases[$("case").value], ...Object.fromEntries(FIELDS.map((field) => [field, $(field).value])) });
+
 function select(index) {
   const c = cases[index];
-  for (const field of ["program", "variables", "limits"]) $(field).value = c[field];
-  $("expect").textContent = JSON.stringify(c.expect, null, 2);
+  for (const field of FIELDS) $(field).value = c[field];
+  const script = c.debug ? `\n\nScripted debugger, at the configuration's breakpoints: actions ${JSON.stringify(c.debug.actions)};\nmust pause at ${listed(c.debug.pauses)}` : "";
+  $("expect").textContent = JSON.stringify(c.expect, null, 2) + script;
   $("outcome").textContent = $("verdict").textContent = "";
+  listSteps();
+}
+
+// Shows a result, and whether it's what the case expects.
+function show(c, result) {
+  const wrong = problem(c, result);
+  const pauses = result.pauses ? `\n\nPaused at ${listed(result.pauses)}` : "";
+  $("outcome").textContent = JSON.stringify(result.outcome, null, 2) + pauses;
+  $("verdict").textContent = wrong ? `✗ not as expected: ${wrong.startsWith("paused") ? wrong : "see the outcome"}` : "✓ as expected";
+  $("verdict").className = wrong ? "fail" : "pass";
 }
 
 $("run").onclick = async () => {
-  const c = cases[$("case").value];
-  const edited = { program: $("program").value, variables: $("variables").value, limits: $("limits").value };
-  const outcome = await execute(edited);
-  const pass = contains(outcome, c.expect);
-  $("outcome").textContent = JSON.stringify(outcome, null, 2);
-  $("verdict").textContent = pass ? "✓ as expected" : "✗ not as expected";
-  $("verdict").className = pass ? "pass" : "fail";
+  const c = edited();
+  try {
+    show(c, await execute(c));
+  } catch (error) {
+    $("outcome").textContent = String(error);
+  }
 };
 
 $("all").onclick = async () => {
   $("results").innerHTML = "";
   let failed = 0;
   for (const c of cases) {
-    const outcome = await execute(c);
-    const pass = contains(outcome, c.expect);
-    failed += pass ? 0 : 1;
+    const wrong = problem(c, await execute(c));
+    failed += wrong ? 1 : 0;
     const row = $("results").insertRow();
-    row.insertCell().textContent = pass ? "✓" : "✗";
-    row.insertCell().textContent = pass ? c.name : `${c.name}: got ${JSON.stringify(outcome).slice(0, 300)}`;
-    row.className = pass ? "pass" : "fail";
+    row.insertCell().textContent = wrong ? "✗" : "✓";
+    row.insertCell().textContent = wrong ? `${c.name}: ${wrong}` : c.name;
+    row.className = wrong ? "fail" : "pass";
   }
   $("verdict").textContent = failed ? `✗ ${failed} of ${cases.length} failed` : `✓ all ${cases.length} passed`;
   $("verdict").className = failed ? "fail" : "pass";
   document.body.dataset.result = failed ? "fail" : "pass"; // for headless browsers
 };
 
+// ── The debugger ────────────────────────────────────────────────────────────
+
+let resume = null; // while paused: resume(action)
+
+// An element with these properties and children.
+const el = (tag, props, ...children) => {
+  const element = Object.assign(document.createElement(tag), props);
+  element.append(...children);
+  return element;
+};
+// Where a step is, for people: the root's path is empty.
+const at = (path) => path || "(root)";
+// What a step is: its kind and name ("set fee", "call text.trim"). Pauses
+// have the same fields as the steps listed.
+const label = (step) => `${step.kind}${step.name ? ` ${step.name}` : ""}`;
+
+// The run configuration being edited, or null if it isn't JSON (the check
+// below the steps says why).
+function config() {
+  try {
+    return JSON.parse($("config").value || "{}");
+  } catch {
+    return null;
+  }
+}
+const breakpoints = () => config()?.breakpoints ?? [];
+// Whether a breakpoint names a step: by its path, or its tag.
+const names = (breakpoint, step) => breakpoint.path === step.path || (breakpoint.tag !== undefined && breakpoint.tag === step.tag);
+
+let rows = []; // [row, step] for each step listed
+
+// The program's steps, from the engine, each a row that toggles its breakpoint.
+function listSteps() {
+  let listing;
+  try {
+    listing = JSON.parse(steps($("program").value, executors(), $("limits").value));
+  } catch (error) {
+    listing = { ok: false, error: { message: error.message } };
+  }
+  rows = [];
+  if (!listing.ok) {
+    $("steps").textContent = listing.error.message;
+    $("check").textContent = "";
+    return;
+  }
+  const list = [];
+  for (const [i, step] of listing.steps.entries()) {
+    if (step.function !== listing.steps[i - 1]?.function) list.push(el("div", { className: "fn" }, `fn ${step.function}`));
+    const row = el("div", { className: "step" }, el("span", { className: "dot" }, "●"), label(step),
+      el("small", {}, `  ${at(step.path)}${step.tag ? ` #${step.tag}` : ""}`));
+    row.dataset.path = step.path;
+    row.style.paddingLeft = `${0.4 + step.depth * 1.2}em`;
+    row.onclick = () => toggle(step);
+    rows.push([row, step]);
+    list.push(row);
+  }
+  $("steps").replaceChildren(...list);
+  checkConfig();
+}
+
+// Marks the steps the configuration's breakpoints name, and says what's
+// wrong with it, if anything: not JSON, or a breakpoint that names no step.
+function checkConfig() {
+  const set = breakpoints();
+  for (const [row, step] of rows) row.classList.toggle("bp", set.some((breakpoint) => names(breakpoint, step)));
+  let message;
+  try {
+    const checked = JSON.parse(check($("program").value, $("config").value, executors(), $("limits").value));
+    message = checked.ok ? "" : checked.error.message;
+  } catch (error) {
+    message = error.message;
+  }
+  $("check").textContent = message;
+}
+
+// Sets or clears a step's breakpoint, in the configuration: by its tag, if
+// it has one, so that edits to the program don't move it; else its path.
+function toggle(step) {
+  const draft = config();
+  if (!draft) return;
+  const set = draft.breakpoints ?? [];
+  const others = set.filter((breakpoint) => !names(breakpoint, step));
+  draft.breakpoints = others.length < set.length ? others : [...set, step.tag === undefined ? { path: step.path } : { tag: step.tag }];
+  $("config").value = JSON.stringify(draft, null, 2);
+  checkConfig();
+}
+
+let relist = 0;
+const later = (f) => () => { clearTimeout(relist); relist = setTimeout(f, 300); };
+for (const field of ["program", "limits"]) $(field).oninput = later(listSteps);
+$("config").oninput = later(checkConfig);
+
+// Shows a pause: where, the call stack, and the chosen frame's variables.
+function paused(pause) {
+  $("where").textContent = `Paused before ${label(pause)} at ${at(pause.path)} (${pause.reason}), ${pause.steps} steps taken.`;
+  for (const row of $("steps").children) {
+    row.classList.toggle("current", row.dataset.path === pause.path);
+    if (row.dataset.path === pause.path) row.scrollIntoView({ block: "nearest" });
+  }
+  // A frame's scopes, innermost first: a function's arguments, or the run's
+  // variables, then a block's for each `do` it's inside.
+  const showScopes = (frame) => {
+    const kind = (i) => (i > 0 ? "block" : frame.function ? "arguments" : "variables");
+    $("scopes").textContent = frame.scopes.map((scope, i) => `${kind(i)}: ${JSON.stringify(scope)}`).reverse().join("\n");
+  };
+  const items = [...pause.frames].reverse().map((frame) => {
+    const called = frame.function ? `  called at ${at(frame.call)}` : "";
+    const item = el("li", {}, frame.function ?? "(program)", el("small", {}, called));
+    item.onclick = () => {
+      for (const other of items) other.classList.toggle("selected", other === item);
+      showScopes(frame);
+    };
+    return item;
+  });
+  $("stack").replaceChildren(...items);
+  items[0].click(); // the paused step's own frame
+}
+
+const ACTIONS = ["stepOver", "stepInto", "continue", "stop"];
+
+// While debugging, nothing else runs and the program can't change.
+function debugging(on) {
+  $("debugger").hidden = !on;
+  for (const id of ["run", "all", "debug", "case"]) $(id).disabled = on;
+  // Breakpoints can still change, from the steps.
+  for (const id of FIELDS) $(id).readOnly = on;
+  awaiting(false);
+  if (!on) for (const row of $("steps").children) row.classList.remove("current");
+}
+
+// Whether a pause is waiting for one of the action buttons.
+function awaiting(on) {
+  for (const id of ACTIONS) $(id).disabled = !on;
+  if (!on) $("where").textContent = "Running…";
+}
+
+$("debug").onclick = async () => {
+  const c = edited();
+  listSteps();
+  debugging(true);
+  $("outcome").textContent = $("verdict").textContent = "";
+  try {
+    const outcome = await debug(c.program, c.config, executors(), c.limits, (pause) => {
+      paused(pause);
+      awaiting(true);
+      // Answered by a button: with the breakpoints as they are by then.
+      return new Promise((resolve) => {
+        resume = (action) => {
+          resume = null;
+          awaiting(false);
+          resolve({ action, breakpoints: breakpoints() });
+        };
+      });
+    });
+    // You did the stepping, not the case's script: only the outcome is checked.
+    show({ ...c, debug: undefined }, { outcome: JSON.parse(outcome) });
+  } catch (error) {
+    $("outcome").textContent = String(error);
+  } finally {
+    debugging(false);
+  }
+};
+for (const action of ACTIONS) $(action).onclick = () => resume?.(action);
+
 cases.forEach((c, i) => $("case").add(new Option(c.name, i)));
 $("case").onchange = () => select($("case").value);
 select(0);
-$("run").disabled = $("all").disabled = false;
+$("run").disabled = $("all").disabled = $("debug").disabled = false;
 if (location.hash === "#all") $("all").click();
 </script>
 </body>

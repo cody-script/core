@@ -98,6 +98,28 @@ fn run(c: &mut Criterion) {
     group.finish();
 }
 
+/// Debugging: the sum loop under a debugger, with a breakpoint to check
+/// before every step that pauses it only at the very end. Compare with
+/// `run/sum_loop/1000`.
+fn debug(c: &mut Criterion) {
+    let engine = scenario::engine();
+    let mut group = c.benchmark_group("debug");
+    let sum = scenario::compile(&engine, &scenario::sum_loop());
+    let debugged = || {
+        let options = scenario::options(scenario::n(1_000));
+        sum.debug_blocking(
+            options,
+            scenario::at_the_end(&sum),
+            scenario::passing_debugger(),
+        )
+    };
+    // A run that fails (a breakpoint naming no step, say) would be quick.
+    assert_eq!(debugged().unwrap().steps, scenario::sum_loop_steps(1_000));
+    group.throughput(Throughput::Elements(scenario::sum_loop_steps(1_000)));
+    group.bench_function("sum_loop/1000", |b| b.iter(debugged));
+    group.finish();
+}
+
 /// JSON in and out, as a host storing rules as JSON would run them.
 fn json(c: &mut Criterion) {
     let engine = scenario::engine();
@@ -124,6 +146,6 @@ criterion_group! {
     config = Criterion::default()
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3));
-    targets = compile, run, json
+    targets = compile, run, debug, json
 }
 criterion_main!(benches);

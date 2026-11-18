@@ -5,8 +5,8 @@
 mod common;
 mod support;
 
-use codyscript_core::Value;
-use codyscript_json::{SCHEMA, to_serde_json};
+use codyscript_core::{RunConfig, Value};
+use codyscript_json::{RUN_CONFIG_SCHEMA, SCHEMA, to_serde_json};
 
 fn validator() -> jsonschema::Validator {
     let schema: serde_json::Value = serde_json::from_str(SCHEMA).expect("schema.json is JSON");
@@ -57,4 +57,52 @@ fn accepts_every_program_in_the_readmes() {
             errors(&validator, &program)
         );
     }
+}
+
+// ── Run configurations ──────────────────────────────────────────────────────
+
+/// Run configurations, and whether they're well formed.
+const RUN_CONFIGS: &[(&str, bool)] = &[
+    ("{}", true),
+    (r#"{ "variables": { "Name": " Ada " } }"#, true),
+    (r#"{ "breakpoints": [] }"#, true),
+    (
+        r#"{ "breakpoints": [{ "tag": "fee" }, { "path": "/do/1" }, { "path": "" }] }"#,
+        true,
+    ),
+    (
+        r#"{ "variables": { "n": 1 }, "breakpoints": [{ "path": "/fn/a~1b/do/0" }] }"#,
+        true,
+    ),
+    // Not objects, unknown fields, limits (the host's), wrong types.
+    ("[]", false),
+    (r#"{ "limits": { "maxSteps": 10 } }"#, false),
+    (r#"{ "variables": [1] }"#, false),
+    (r#"{ "breakpoints": { "tag": "fee" } }"#, false),
+    (r#"{ "breakpoints": ["/do/1"] }"#, false),
+    // A breakpoint names a step one way: a tag or a path, not both, not neither.
+    (
+        r#"{ "breakpoints": [{ "tag": "fee", "path": "/do/1" }] }"#,
+        false,
+    ),
+    (r#"{ "breakpoints": [{}] }"#, false),
+    (r#"{ "breakpoints": [{ "line": 3 }] }"#, false),
+    (r#"{ "breakpoints": [{ "tag": 3 }] }"#, false),
+];
+
+#[test]
+fn the_run_config_schema_and_the_parser_agree() {
+    let schema: serde_json::Value = serde_json::from_str(RUN_CONFIG_SCHEMA).expect("JSON");
+    let validator = jsonschema::draft202012::new(&schema).expect("a valid schema");
+    for &(json, valid) in RUN_CONFIGS {
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(validator.is_valid(&value), valid, "schema: {json}");
+        let parsed = codyscript_json::from_str::<RunConfig>(json);
+        assert_eq!(parsed.is_ok(), valid, "parser: {json}: {parsed:?}");
+    }
+    // A path that isn't a JSON Pointer can't name a step: the schema says
+    // so as it's written, `check` when it meets a program.
+    let not_a_pointer = r#"{ "breakpoints": [{ "path": "do/1" }] }"#;
+    assert!(!validator.is_valid(&serde_json::from_str(not_a_pointer).unwrap()));
+    assert!(codyscript_json::from_str::<RunConfig>(not_a_pointer).is_ok());
 }

@@ -8,6 +8,8 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::RunConfig;
+use crate::debug::{self, Breakpoint, Debugger, Session, Step};
 use crate::error::Error;
 use crate::executor::{Executor, ExecutorCall, ExecutorResult, Signal, from_async_fn, from_fn};
 use crate::program::Program;
@@ -218,7 +220,7 @@ impl Inner {
     }
 
     async fn run(&self, root: &Program, options: RunOptions) -> Result<RunResult, Error> {
-        run::run(root, self.limits, options).await
+        run::run(root, self.limits, options, None).await
     }
 }
 
@@ -351,6 +353,58 @@ impl CompiledProgram {
     /// Runs the program.
     pub async fn run(&self, options: RunOptions) -> Result<RunResult, Error> {
         self.engine.run(&self.root, options).await
+    }
+
+    /// Runs the program under `debugger`, pausing before each step
+    /// `breakpoints` name and wherever the debugger's [`Action`]s say.
+    ///
+    /// Each time, it waits for `debugger` to say how to go on, and may be
+    /// given different breakpoints. With none, it never pauses. A breakpoint
+    /// that names no step fails it with `invalid_config` — before it
+    /// starts, or when it goes on. Apart from the pauses it runs as
+    /// [`run`](CompiledProgram::run) does, with the same result, steps and
+    /// limits — and fails with `aborted` if told to
+    /// [`Stop`](debug::Action::Stop). See the [`debug`] module; the
+    /// options and breakpoints usually come from a [`RunConfig`].
+    ///
+    /// A run that isn't debugged pays nothing for this: its loop is built
+    /// without the checks.
+    ///
+    /// [`Action`]: debug::Action
+    pub async fn debug(
+        &self,
+        options: RunOptions,
+        breakpoints: impl IntoIterator<Item = Breakpoint>,
+        mut debugger: impl Debugger,
+    ) -> Result<RunResult, Error> {
+        let breakpoints = breakpoints.into_iter().collect();
+        let session = Session::new(&self.root, breakpoints, &mut debugger)?;
+        run::run(&self.root, self.engine.limits, options, Some(session)).await
+    }
+
+    /// [`debug`](CompiledProgram::debug), blocking the current thread until
+    /// it finishes, as [`run_blocking`](CompiledProgram::run_blocking) does.
+    pub fn debug_blocking(
+        &self,
+        options: RunOptions,
+        breakpoints: impl IntoIterator<Item = Breakpoint>,
+        debugger: impl Debugger,
+    ) -> Result<RunResult, Error> {
+        block_on(self.debug(options, breakpoints, debugger))
+    }
+
+    /// Checks a run configuration against the program: each of its
+    /// breakpoints must name a step. Fails with `invalid_config`, listing
+    /// every one that doesn't, as [`debug`](CompiledProgram::debug) would.
+    pub fn check(&self, config: &RunConfig) -> Result<(), Error> {
+        debug::check(&self.steps(), &config.breakpoints)
+    }
+
+    /// Every step of the program — each node a run can pause before, and a
+    /// breakpoint can name — in the order written: its body's, then each
+    /// function's in `fn`.
+    pub fn steps(&self) -> Vec<Step<'_>> {
+        debug::steps(&self.root)
     }
 
     /// [`run`](CompiledProgram::run), blocking the current thread until it

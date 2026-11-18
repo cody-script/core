@@ -70,5 +70,40 @@ garbage-collected, or at once with `program.free()` (or `using`).
 
 Also exported: `version()` and `schema()` (the JSON Schema, as text).
 
+### Debugging
+
+`debug(program, config, executors, limits, onPause) → Promise<string>`
+runs a program as `run` does, but takes a run configuration — its
+variables, and its breakpoints, as JSON text (`""` for none) — and pauses
+it at the breakpoints, calling `onPause(pause)` each time and waiting for
+its answer, which may come from a promise — when a person clicks, say:
+
+```js
+const config = '{ "variables": { "Name": " Ada " }, "breakpoints": [{ "tag": "name-required" }] }';
+const outcome = JSON.parse(await debug(programJson, config, executors, "", (pause) => {
+  // pause: { reason, path, kind, name?, tag?, function?, depth, steps, breakpoints,
+  //          frames: [{ function?, call?, scopes: [{…}, …] }, …] }
+  show(pause);                                  // your UI
+  return new Promise((resolve) => (onClick = resolve));   // "stepOver", …
+}));
+```
+
+A run configuration is `{ "variables"?: {…}, "breakpoints"?: [{ "tag": … }
+or { "path": … }, …] }`; `runConfigSchema()` is its JSON Schema. A
+breakpoint names the steps with a tag, or the step at a path, as
+`steps(program, executors, limits)` lists them —
+`{"ok":true,"steps":[{ path, kind, name?, tag?, function?, depth }, …]}`;
+prefer tags, which edits to the program don't move. A breakpoint that names
+no step makes the outcome an `invalid_config` error; `check(program, config,
+executors, limits)` says so without running (`{"ok":true}` or
+`{"ok":false,"error":{…}}`).
+
+It pauses only at breakpoints (`reason: "breakpoint"`), and then where the
+actions it's given take it (`"step"`); with no breakpoints, never. Answer
+`"stepOver"`, `"stepInto"`, `"continue"` or `"stop"` (which ends the run
+with an `aborted` error), or `{ action, breakpoints }` to replace the
+breakpoints too. It resolves as `run` does, and also rejects if `config`
+isn't a run configuration, or `onPause` throws or answers anything else.
+
 The language itself — nodes, expressions, errors and limits — is documented
 in the [core's README](https://github.com/cody-script/core/tree/main/crates/codyscript-core#readme).

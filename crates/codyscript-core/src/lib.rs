@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod config;
+pub mod debug;
 mod engine;
 mod error;
 pub mod executor;
@@ -11,6 +13,7 @@ mod run;
 mod validate;
 pub mod value;
 
+pub use config::RunConfig;
 pub use engine::{
     CompiledProgram, Engine, EngineBuilder, Limits, RunOptions, RunResult, Variables,
 };

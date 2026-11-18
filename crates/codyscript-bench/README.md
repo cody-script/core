@@ -47,6 +47,7 @@ cargo bench -p codyscript-bench --bench speed -- --baseline before
 | `run/call_loop/1000` | 1,000 calls to a synchronous executor: the cost of a call. |
 | `run/function_loop/1000` | 1,000 calls to a CodyScript function (`fn`): the cost of a call with a fresh scope. |
 | `run/lookup/{4,64,1024}` | 1,000 variable reads from a scope of that many variables. |
+| `debug/sum_loop/1000` | `run/sum_loop/1000` under a debugger, with a breakpoint to check at every step that pauses it only at the very end: what debugging costs a run between pauses. |
 | `json/parse`, `json/end_to_end`, `json/compiled_once` | Parsing the README rule; parsing, compiling (`compile_json`), running and printing it for a row; and a row's cost when the rule is compiled once: parse the row, run, print. |
 | `tokio/executor/…` | One run making 100 executor calls: `blocking` (`run_blocking`), on Tokio's `current_thread` or `multi_thread` runtime, or on the JavaScript `event_loop` (WebAssembly) — with `sync` executors, `async_ready` ones (async, but never waiting) and `yielding` ones (suspending once per call, as I/O would; the same code on both runtimes). |
 | `tokio/concurrency/…` | 64 such runs of one compiled program: `sequential`, or spawned on `current_thread` / `multi_thread`, or interleaved on the `event_loop` (WebAssembly). |
@@ -81,9 +82,20 @@ From the machine this was written on: 4 vCPUs (Intel Xeon, 2.6 GHz), Rust
 | `run/sum_loop/1000` | 0.80 ms (17 M steps/s) | 1.2 ms | 1.5× |
 | `run/call_loop/1000` | 0.80 ms (1.25 M calls/s) | 1.4 ms | 1.8× |
 | `run/function_loop/1000` | 0.61 ms (1.6 M calls/s) | 0.84 ms | 1.4× |
+| `debug/sum_loop/1000` | 1.1–1.6 ms | 2.0 ms | 1.3–1.8× |
 | `json/parse` | 5.0 µs (43 MiB/s) | 7.2 µs | 1.5× |
 | `json/end_to_end` | 15 µs | 26 µs | 1.7× |
 | `json/compiled_once` | 2.6 µs | 4.0 µs | 1.6× |
+
+`debug/sum_loop` was measured in an earlier session too, before the run
+loop's allocations were removed, beside `run/sum_loop/1000`
+at 0.8–1.3 ms natively and 0.95 ms in WebAssembly: between pauses, a
+debugged run is 1.3–1.5× slower natively (24% more instructions, counted
+with Valgrind, whose counts don't vary as timings do here) and 2× in
+WebAssembly. The debugger's code favors clarity over speed — the run asks
+its debugging session before every step — since a debugged run spends its
+time paused anyway. Runs that aren't debugged don't pay for it: their
+instruction counts didn't change when it was added.
 
 `run/function_loop` was measured in an earlier session, before the run
 loop's allocations were removed, in which `run/call_loop` took 0.54 ms

@@ -65,6 +65,25 @@ root; `compile` also checks what each `call` names, that no name is both in
 provides every `ext` function, nesting depth, expression syntax and that
 numbers are finite. A test keeps the two in agreement.
 
+## Run configurations
+
+A program's run configuration — its variables, and its breakpoints for a
+debugger — is a JSON document of its own, kept beside the program (see the
+core's README, "Debugging"). Read one with `from_str::<RunConfig>`; an
+object is required, and a field it doesn't know is an error:
+
+```json
+{ "variables": { "Amount": 20000 },
+  "breakpoints": [{ "tag": "cap" }, { "path": "/do/1" }] }
+```
+
+[`run-config.schema.json`](run-config.schema.json) (also
+`codyscript_json::RUN_CONFIG_SCHEMA`) is its JSON Schema, for IDEs that
+write and check them. It accepts and refuses what the parser does — a test
+keeps them in agreement — and also that breakpoint paths are JSON Pointers;
+`compiled.check(&config)` checks that each breakpoint names a step of the
+program.
+
 ## Storing programs
 
 Store programs minified, and compress them if size matters: gzip shrinks a

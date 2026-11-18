@@ -4,8 +4,8 @@
 //! produced, block results, scopes — driven by one loop. Nothing recurses, so
 //! the stack a run uses doesn't grow with the program's depth, nor with how
 //! deeply its functions call each other: neither can overflow it, natively or
-//! under WebAssembly's small stack. The loop's only `.await` is an executor
-//! call.
+//! under WebAssembly's small stack. The loop's only `.await`s are an executor
+//! call and, in a debugged run, a pause.
 //!
 //! Every step is counted at the moment the recursive definition (the
 //! TypeScript engine) counts it, and in the same order: an instruction or
@@ -16,21 +16,29 @@
 //! its input. Only those two calls are direct (resolving an input never runs
 //! instructions itself; a block's are pushed as a task), so the native stack
 //! stays the same depth however the program nests.
+//!
+//! A debugged run may pause before each step to ask its debugger how to go
+//! on. The loop is built twice, with and without that check, so a run that
+//! isn't debugged doesn't pay for it. A debugged run does nothing at once:
+//! every step is a task of its own, so it can pause before any of them.
 
+use crate::debug::{Frame, Node, Session};
 use crate::engine::{Limits, RunOptions, RunResult, Variables};
 use crate::error::{Cause, Details, Error, ErrorCode};
 use crate::executor::{ExecutorCall, Signal};
 use crate::expression::{self, Fault, Stop};
 use crate::program::{
-    Call, Expression, External, Input, InputKind, Instruction, InstructionKind, Program,
+    Call, Expression, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
 };
 use crate::value::{Map, Value};
 
-/// Runs `program`'s body to completion.
-pub(crate) async fn run(
-    program: &Program,
+/// Runs `program`'s body to completion; in a debugging session, pausing
+/// where it says.
+pub(crate) async fn run<'p>(
+    program: &'p Program,
     limits: Limits,
     options: RunOptions,
+    debug: Option<Session<'p, '_>>,
 ) -> Result<RunResult, Error> {
     let mut machine = Machine {
         functions: &program.functions,
@@ -42,15 +50,20 @@ pub(crate) async fn run(
         max_depth: limits.max_depth,
         scopes: vec![options.variables],
         base: 0,
-        calls: 0,
+        invocations: Vec::new(),
         tasks: Vec::new(),
         values: Vec::new(),
         results: Vec::new(),
+        debug,
     };
     // The body runs in the root scope, so its assignments are the result's
     // variables.
     machine.enter(&program.body);
-    machine.drive().await?;
+    if machine.debug.is_some() {
+        machine.drive::<true>().await?;
+    } else {
+        machine.drive::<false>().await?;
+    }
     Ok(RunResult {
         value: machine.values.pop().unwrap_or_default(),
         variables: machine.scopes.swap_remove(0),
@@ -64,6 +77,9 @@ enum Task<'p> {
     Resolve(&'p Input),
     /// Run these instructions in order, in the current block.
     List(&'p [Instruction]),
+    /// Run this instruction. Only a debugged run has these: other runs
+    /// execute an instruction at once.
+    Execute(&'p Instruction),
     /// Call the external function with the arguments on the value stack.
     Call(&'p External, &'p Input),
     /// Run the function with the arguments on the value stack as its
@@ -87,14 +103,56 @@ enum Task<'p> {
     /// scope, if it has its own, goes.
     EndBlock { scoped: bool },
     /// The current function is over: its value stays, its scopes go, and
-    /// the caller's, from `base` up, are visible again.
-    EndCall { base: usize },
+    /// the caller's are visible again.
+    EndCall,
+}
+
+impl<'p> Task<'p> {
+    /// The step this task takes, if it's one: a debugger may pause before it.
+    fn step(&self) -> Option<Node<'p>> {
+        match *self {
+            Task::Resolve(input) => Some(Node::Input(input)),
+            Task::Execute(ins) => Some(Node::Instruction(ins)),
+            _ => None,
+        }
+    }
+}
+
+/// A CodyScript function running: a frame of the call stack.
+struct Invocation<'p> {
+    /// The `call` running it.
+    call: &'p Input,
+    function: &'p Function,
+    /// Where its scopes start.
+    base: usize,
+}
+
+/// The call stack, as a debugger sees it: the program's body, then each
+/// function running, each with its own scopes.
+fn frames<'a>(scopes: &'a [Variables], invocations: &'a [Invocation<'_>]) -> Vec<Frame<'a>> {
+    let mut frames = Vec::with_capacity(invocations.len() + 1);
+    let mut end = scopes.len();
+    for invocation in invocations.iter().rev() {
+        frames.push(Frame {
+            function: Some(&invocation.function.name),
+            call: Some(&invocation.call.path),
+            scopes: &scopes[invocation.base..end],
+        });
+        end = invocation.base;
+    }
+    frames.push(Frame {
+        function: None,
+        call: None,
+        scopes: &scopes[..end],
+    });
+    frames.reverse();
+    frames
 }
 
 /// One run's state.
-struct Machine<'p> {
-    /// The program's function bodies, by index.
-    functions: &'p [Input],
+struct Machine<'p, 'd> {
+    /// The program's functions, by index.
+    functions: &'p [Function],
     meter: Meter,
     /// How deeply calls may nest.
     max_depth: usize,
@@ -104,32 +162,55 @@ struct Machine<'p> {
     /// Where the running function's scopes start: reads don't fall through
     /// below it, so a function sees only its own variables.
     base: usize,
-    /// How many calls are running.
-    calls: usize,
+    /// The calls running, outermost first; how many decides `depth_limit`.
+    invocations: Vec<Invocation<'p>>,
     tasks: Vec<Task<'p>>,
     values: Vec<Value>,
     /// What each running block will return (`null` until a `ret`).
     results: Vec<Value>,
+    /// The debugger, in a debugged run.
+    debug: Option<Session<'p, 'd>>,
 }
 
-impl<'p> Machine<'p> {
-    async fn drive(&mut self) -> Result<(), Error> {
+impl<'p> Machine<'p, '_> {
+    /// Does every task. `DEBUGGED` (whether `debug` is set) builds the loop
+    /// twice, so that only a debugged run has the chance to pause.
+    async fn drive<const DEBUGGED: bool>(&mut self) -> Result<(), Error> {
         while let Some(task) = self.tasks.pop() {
             if let Task::Call(operation, node) = task {
                 let value = self.call(operation, node).await?;
                 self.values.push(value);
+            } else if DEBUGGED {
+                self.debug_task(task).await?;
             } else {
-                self.perform(task)?;
+                self.perform::<false>(task)?;
             }
         }
         Ok(())
     }
 
-    /// Does one task that needs no waiting.
-    fn perform(&mut self, task: Task<'p>) -> Result<(), Error> {
+    /// Does `task` in a debugged run — first, if it's a step, letting the
+    /// debugging session pause the run, and stop it.
+    async fn debug_task(&mut self, task: Task<'p>) -> Result<(), Error> {
+        if let Some(step) = task.step()
+            && let Some(session) = self.debug.as_mut()
+        {
+            let frames = || frames(&self.scopes, &self.invocations);
+            let depth = self.invocations.len();
+            session
+                .before(step, depth, self.meter.steps, frames)
+                .await?;
+        }
+        self.perform::<true>(task)
+    }
+
+    /// Does one task that needs no waiting. In a debugged run (`DEBUGGED`),
+    /// it pushes the steps it would otherwise take at once.
+    fn perform<const DEBUGGED: bool>(&mut self, task: Task<'p>) -> Result<(), Error> {
         match task {
             Task::Resolve(input) => self.resolve(input)?,
-            Task::List(list) => self.list(list)?,
+            Task::List(list) => self.list::<DEBUGGED>(list)?,
+            Task::Execute(ins) => self.execute::<DEBUGGED>(ins)?,
             Task::Assign(name) => {
                 let value = self.pop();
                 // Reassigning, the usual case in a loop, needs no new name.
@@ -144,16 +225,16 @@ impl<'p> Machine<'p> {
             Task::Return => self.ret(),
             Task::Branch { then, otherwise } => {
                 if truthy(&self.pop()) {
-                    self.list(then)?;
+                    self.list::<DEBUGGED>(then)?;
                 } else if let Some(otherwise) = otherwise {
-                    self.list(otherwise)?;
+                    self.list::<DEBUGGED>(otherwise)?;
                 }
             }
             Task::Loop { test, body } => {
                 if truthy(&self.pop()) {
                     self.tasks.push(Task::Loop { test, body });
                     self.tasks.push(Task::Resolve(test));
-                    self.list(body)?;
+                    self.list::<DEBUGGED>(body)?;
                 }
             }
             Task::EndBlock { scoped } => {
@@ -164,10 +245,10 @@ impl<'p> Machine<'p> {
                 self.values.push(result);
             }
             Task::Invoke(call, node) => self.invoke(call, node)?,
-            Task::EndCall { base } => {
+            Task::EndCall => {
                 self.scopes.truncate(self.base);
-                self.base = base;
-                self.calls -= 1;
+                self.invocations.pop();
+                self.base = self.invocations.last().map_or(0, |i| i.base);
             }
             Task::Call(..) => unreachable!("calls are awaited by drive()"),
         }
@@ -219,20 +300,25 @@ impl<'p> Machine<'p> {
         Ok(())
     }
 
-    /// Runs `list`'s first instruction now, and the rest after it.
-    fn list(&mut self, list: &'p [Instruction]) -> Result<(), Error> {
+    /// Runs `list`'s first instruction now (in a debugged run, next), and
+    /// the rest after it.
+    fn list<const DEBUGGED: bool>(&mut self, list: &'p [Instruction]) -> Result<(), Error> {
         let Some((first, rest)) = list.split_first() else {
             return Ok(());
         };
         if !rest.is_empty() {
             self.tasks.push(Task::List(rest));
         }
-        self.execute(first)
+        if DEBUGGED {
+            self.tasks.push(Task::Execute(first));
+            return Ok(());
+        }
+        self.execute::<false>(first)
     }
 
-    /// Runs an instruction: resolves its input now, and pushes what to do
-    /// with the value.
-    fn execute(&mut self, ins: &'p Instruction) -> Result<(), Error> {
+    /// Runs an instruction: resolves its input now (in a debugged run,
+    /// next), and pushes what to do with the value.
+    fn execute<const DEBUGGED: bool>(&mut self, ins: &'p Instruction) -> Result<(), Error> {
         self.step(&ins.path, ins.tag.as_deref())?;
         let input = match &ins.kind {
             InstructionKind::Set { name, to } => {
@@ -259,6 +345,10 @@ impl<'p> Machine<'p> {
                 test
             }
         };
+        if DEBUGGED {
+            self.tasks.push(Task::Resolve(input));
+            return Ok(());
+        }
         self.resolve(input)
     }
 
@@ -276,7 +366,7 @@ impl<'p> Machine<'p> {
     /// variables of a fresh scope that the caller's can't be read through,
     /// and its body runs there until `EndCall`.
     fn invoke(&mut self, call: &'p Call, node: &'p Input) -> Result<(), Error> {
-        if self.calls >= self.max_depth {
+        if self.invocations.len() >= self.max_depth {
             let message = format!("Calls nest deeper than {} levels", self.max_depth);
             let tag = node.tag.as_deref();
             return Err(failure(
@@ -288,12 +378,16 @@ impl<'p> Machine<'p> {
             ));
         }
         let variables = self.arguments(&call.args);
-        self.calls += 1;
-        self.tasks.push(Task::EndCall { base: self.base });
+        let function = &self.functions[call.function];
+        self.tasks.push(Task::EndCall);
         self.base = self.scopes.len();
+        self.invocations.push(Invocation {
+            call: node,
+            function,
+            base: self.base,
+        });
         self.scopes.push(variables);
-        let functions = self.functions;
-        self.enter(&functions[call.function]);
+        self.enter(&function.body);
         Ok(())
     }
 
@@ -335,18 +429,18 @@ impl<'p> Machine<'p> {
     async fn call(&mut self, external: &External, node: &Input) -> Result<Value, Error> {
         let tag = node.tag.as_deref();
         let call = ExecutorCall {
-            op: external.op.clone(),
+            op: external.op().to_owned(),
             arg: external.arg.clone(),
             input: self.arguments(&external.args),
             signal: self.meter.signal.clone(),
         };
-        let name = || format!("{}.{}", external.exe, external.op);
+        let name = &external.name;
         external.executor.call(call).await.map_err(|error| {
             match error.downcast::<Error>() {
                 // An executor's own engine error passes through unchanged.
                 Ok(own) => *own,
                 Err(cause) => {
-                    let message = format!("Function \"{}\" failed: {cause}", name());
+                    let message = format!("Function \"{name}\" failed: {cause}");
                     let cause = Some(Cause::from(cause));
                     failure(ErrorCode::FunctionFailed, message, &node.path, tag, cause)
                 }

@@ -10,6 +10,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use codyscript_core::debug::{self, Action, Breakpoint, Debugger};
 use codyscript_core::{
     CompiledProgram, Engine, ExecutorCall, ExecutorResult, RunOptions, Value, Variables, value,
 };
@@ -203,6 +204,20 @@ pub fn yielding_engine() -> Engine {
         })
         .max_steps(u64::MAX)
         .build()
+}
+
+/// A breakpoint on `program`'s last step, so a debugged run checks one
+/// before every step but pauses only once, at the very end: what debugging
+/// itself costs, with no one to wait for.
+pub fn at_the_end(program: &CompiledProgram) -> [Breakpoint; 1] {
+    let steps = program.steps();
+    let last = steps.last().expect("the scenario has steps");
+    [Breakpoint::path(last.path)]
+}
+
+/// A debugger that goes straight on.
+pub fn passing_debugger() -> impl Debugger {
+    debug::from_fn(|_| Action::Continue)
 }
 
 /// Returns `Pending` once, waking itself: the task is scheduled again.

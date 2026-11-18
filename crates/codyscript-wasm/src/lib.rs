@@ -2,7 +2,7 @@
 //! external functions written in JavaScript.
 //!
 //! ```js
-//! import init, { compile, run } from "./pkg/codyscript_wasm.js";
+//! import init, { compile, run, debug } from "./pkg/codyscript_wasm.js";
 //! await init();
 //! const executors = {
 //!   text: { trim: ({ input }) => String(input.value ?? "").trim() },
@@ -16,6 +16,11 @@
 //!
 //! // Or compile and run in one go, for a program run only once:
 //! const once = JSON.parse(await run(programJson, '{"Name":" Ada "}', executors, ""));
+//!
+//! // Debugging, with a run configuration: pause at the step tagged "fee",
+//! // then step over to the end.
+//! const config = '{"variables":{"amount":200},"breakpoints":[{"tag":"fee"}]}';
+//! const debugged = JSON.parse(await debug(programJson, config, executors, "", async (pause) => "stepOver"));
 //! ```
 //!
 //! Values cross the boundary as JSON text, so this exercises the whole stack
@@ -24,15 +29,16 @@
 
 use std::rc::Rc;
 
+use codyscript_core::debug::{Action, Breakpoint, Debugger, Pause, Step};
 use codyscript_core::{
     BoxError, BoxFuture, CompiledProgram, Engine, Error, Executor, ExecutorCall, ExecutorResult,
-    Limits, RunOptions, RunResult, Value, Variables,
+    Limits, RunConfig, RunOptions, RunResult, Value, Variables,
 };
 use codyscript_json::EngineJsonExt;
 use js_sys::{Array, Function, JSON, Object, Promise};
 use send_wrapper::SendWrapper;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
@@ -68,9 +74,7 @@ pub fn schema() -> String {
 /// JSON, an executor that isn't an object, or a function that isn't one.
 #[wasm_bindgen]
 pub fn compile(program: &str, executors: JsValue, limits: &str) -> Result<Program, JsValue> {
-    let limits: Limits = parse_or_default(limits, "limits")?;
-    let engine = engine(&executors, limits)?;
-    match engine.compile_json(program) {
+    match compile_program(program, &executors, limits)? {
         Ok(compiled) => Ok(Program {
             compiled: Rc::new(compiled),
         }),
@@ -128,13 +132,136 @@ pub async fn run(
     limits: String,
 ) -> Result<String, JsError> {
     let variables: Variables = parse_or_default(&variables, "variables")?;
-    let limits: Limits = parse_or_default(&limits, "limits")?;
-    let engine = engine(&executors, limits)?;
-    let outcome = match engine.compile_json(&program) {
+    let compiled = compile_program(&program, &executors, &limits)?;
+    let outcome = match compiled {
         Ok(compiled) => compiled.run(RunOptions::from(variables)).await,
         Err(error) => Err(error),
     };
     outcome_json(&outcome).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Lists a program's steps: what a breakpoint can name.
+///
+/// Takes `program`, `executors` and `limits` as [`run`] does (a program is
+/// compiled, so its `ext` is checked against the executors). Returns JSON
+/// text: `{"ok":true,"steps":[{"path","kind","name"?,"tag"?,"depth"},…]}`
+/// — in the order written, the body's and then each function's — or
+/// `{"ok":false,"error":{…}}` for a program that doesn't compile.
+#[wasm_bindgen]
+pub fn steps(program: String, executors: JsValue, limits: String) -> Result<String, JsError> {
+    #[derive(Serialize)]
+    struct Listed<'a> {
+        ok: bool,
+        steps: Vec<Step<'a>>,
+    }
+    let json = match compile_program(&program, &executors, &limits)? {
+        Ok(compiled) => codyscript_json::to_string(&Listed {
+            ok: true,
+            steps: compiled.steps(),
+        }),
+        Err(error) => codyscript_json::to_string(&Failed {
+            ok: false,
+            error: &error,
+        }),
+    };
+    json.map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Compiles and runs a program under a debugger written in JavaScript.
+///
+/// Takes `program`, `executors` and `limits` as [`run`] does; `config`, a
+/// run configuration as JSON text — `{ "variables"?: {…}, "breakpoints"?:
+/// [{ "tag": … } or { "path": … }, …] }`, or `""` for none (see
+/// [`runConfigSchema`](run_config_schema)); and `onPause`, a function the
+/// run calls each time it pauses before a step: at a breakpoint (`reason`
+/// `"breakpoint"`), or where stepping ends (`"step"`) — nowhere else. It
+/// receives `{ reason, path, kind, name?, tag?, function?, depth, steps,
+/// frames: [{ function?, call?, scopes }], breakpoints }` — the step, as
+/// [`steps`] lists it, and more — and returns, or resolves to (taking as
+/// long as it likes), how to go on: `"stepOver"`, `"stepInto"`,
+/// `"continue"` or `"stop"`, or `{ action, breakpoints? }` to change the
+/// breakpoints too.
+///
+/// Resolves as `run` does; a stopped run is an `aborted` error, and a
+/// breakpoint that names no step an `invalid_config` one. Rejects as `run`
+/// does, if `config` isn't a run configuration, or if `onPause` throws,
+/// rejects, or returns anything else.
+#[wasm_bindgen]
+pub async fn debug(
+    program: String,
+    config: String,
+    executors: JsValue,
+    limits: String,
+    #[wasm_bindgen(js_name = "onPause")] on_pause: Function,
+) -> Result<String, JsError> {
+    let RunConfig {
+        variables,
+        breakpoints,
+    } = parse_or_default(&config, "config")?;
+    let mut debugger = JsDebugger {
+        on_pause: SendWrapper::new(on_pause),
+        failure: None,
+    };
+    let outcome = match compile_program(&program, &executors, &limits)? {
+        Ok(compiled) => {
+            let options = RunOptions::from(variables);
+            compiled.debug(options, breakpoints, &mut debugger).await
+        }
+        Err(error) => Err(error),
+    };
+    if let Some(failure) = debugger.failure {
+        return Err(JsError::new(&format!("onPause: {failure}")));
+    }
+    outcome_json(&outcome).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Checks a run configuration against a program: that each breakpoint
+/// names one of its steps.
+///
+/// Takes `program`, `executors` and `limits` as [`run`] does, and `config`
+/// as [`debug`] does. Returns JSON text: `{"ok":true}`, or
+/// `{"ok":false,"error":{…}}` — `invalid_config`, listing every breakpoint
+/// that names no step, or the program's own error if it doesn't compile.
+/// Throws if `config` isn't a run configuration.
+#[wasm_bindgen]
+pub fn check(
+    program: String,
+    config: String,
+    executors: JsValue,
+    limits: String,
+) -> Result<String, JsError> {
+    #[derive(Serialize)]
+    struct Checked {
+        ok: bool,
+    }
+    let config: RunConfig = parse_or_default(&config, "config")?;
+    let checked = compile_program(&program, &executors, &limits)?.and_then(|c| c.check(&config));
+    let json = match checked {
+        Ok(()) => codyscript_json::to_string(&Checked { ok: true }),
+        Err(error) => codyscript_json::to_string(&Failed {
+            ok: false,
+            error: &error,
+        }),
+    };
+    json.map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// The JSON Schema for run configurations, as JSON text.
+#[wasm_bindgen(js_name = "runConfigSchema")]
+pub fn run_config_schema() -> String {
+    codyscript_json::RUN_CONFIG_SCHEMA.into()
+}
+
+/// `program` compiled by an engine with `executors` and `limits`: a
+/// CodyScript error for the program, a JavaScript one for the arguments.
+fn compile_program(
+    program: &str,
+    executors: &JsValue,
+    limits: &str,
+) -> Result<Result<CompiledProgram, Error>, JsError> {
+    let limits: Limits = parse_or_default(limits, "limits")?;
+    let engine = engine(executors, limits)?;
+    Ok(engine.compile_json(program))
 }
 
 fn parse_or_default<T: DeserializeOwned + Default>(json: &str, what: &str) -> Result<T, JsError> {
@@ -226,6 +353,74 @@ fn outcome_json(outcome: &Result<RunResult, Error>) -> codyscript_json::serde_js
         }),
         Err(error) => codyscript_json::to_string(&Failed { ok: false, error }),
     }
+}
+
+// ── A JavaScript debugger ───────────────────────────────────────────────────
+
+/// `onPause` as a [`Debugger`]. If it fails, the run stops, and `debug`
+/// rejects with `failure`.
+struct JsDebugger {
+    on_pause: SendWrapper<Function>,
+    failure: Option<BoxError>,
+}
+
+/// What `onPause` may return: an action, or `{ action, breakpoints? }`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Reply {
+    Action(Action),
+    With {
+        action: Action,
+        breakpoints: Option<Vec<Breakpoint>>,
+    },
+}
+
+impl Reply {
+    /// How to go on, and the new breakpoints, if any.
+    fn into_parts(self) -> (Action, Option<Vec<Breakpoint>>) {
+        match self {
+            Reply::Action(action) => (action, None),
+            Reply::With {
+                action,
+                breakpoints,
+            } => (action, breakpoints),
+        }
+    }
+}
+
+impl Debugger for JsDebugger {
+    fn pause<'a>(&'a mut self, mut pause: Pause<'a>) -> BoxFuture<'a, Action> {
+        Box::pin(SendWrapper::new(async move {
+            let (action, breakpoints) = match ask(&self.on_pause, &pause).await {
+                Ok(reply) => reply.into_parts(),
+                Err(failure) => {
+                    self.failure = Some(failure);
+                    return Action::Stop;
+                }
+            };
+            if let Some(breakpoints) = breakpoints {
+                *pause.breakpoints_mut() = breakpoints;
+            }
+            action
+        }))
+    }
+}
+
+/// Calls `onPause` with the pause, as a plain object, and reads its reply.
+async fn ask(on_pause: &Function, pause: &Pause<'_>) -> Result<Reply, BoxError> {
+    let pause = JSON::parse(&codyscript_json::to_string(pause)?).map_err(describe)?;
+    let mut reply = on_pause.call1(&JsValue::NULL, &pause).map_err(describe)?;
+    if let Some(promise) = reply.dyn_ref::<Promise>() {
+        reply = JsFuture::from(promise.clone()).await.map_err(describe)?;
+    }
+    let json = JSON::stringify(&reply)
+        .ok()
+        .and_then(|json| JsValue::from(json).as_string())
+        .unwrap_or_else(|| "undefined".into());
+    codyscript_json::from_str(&json).map_err(|_| {
+        let expected = r#""stepOver", "stepInto", "continue", "stop" or { action, breakpoints? }"#;
+        format!("expected {expected}, got {json}").into()
+    })
 }
 
 // ── JavaScript executors ────────────────────────────────────────────────────
