@@ -62,7 +62,7 @@ pub(crate) struct External {
     /// shared with every call.
     pub op: Arc<str>,
     /// The arguments to resolve, in order.
-    pub args: Vec<(String, Input)>,
+    pub args: Vec<(Arc<str>, Input)>,
     /// The static `arg`, passed as written: shared with every call.
     pub arg: Option<Arc<Value>>,
 }
@@ -82,7 +82,7 @@ pub(crate) struct Call {
     /// The function's index in [`Program::functions`].
     pub function: usize,
     /// The arguments to resolve, in order: the function's variables.
-    pub args: Vec<(String, Input)>,
+    pub args: Vec<(Arc<str>, Input)>,
 }
 
 /// Something that does something.
@@ -96,7 +96,7 @@ pub(crate) struct Instruction {
 #[derive(Clone, Debug)]
 pub(crate) enum InstructionKind {
     Set {
-        name: String,
+        name: Arc<str>,
         to: Input,
     },
     Ret(Input),

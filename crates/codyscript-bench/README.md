@@ -136,25 +136,26 @@ third smaller (32-bit pointers):
 
 | Scenario | Allocations | Allocated | Peak | Retained |
 |---|--:|--:|--:|--:|
-| parse the README rule from JSON | 50 | 4.5 KiB | 4.5 KiB | 4.5 KiB |
-| compile the README rule | 45 | 1.9 KiB | 1.7 KiB | 1.5 KiB |
-| compile a wide program (100 instructions) | 1009 | 107.9 KiB | 48.8 KiB | 45.5 KiB |
+| parse the README rule from JSON | 50 | 4.3 KiB | 4.3 KiB | 4.3 KiB |
+| compile the README rule | 44 | 2.0 KiB | 1.7 KiB | 1.6 KiB |
+| compile a wide program (100 instructions) | 1009 | 110.0 KiB | 50.9 KiB | 47.5 KiB |
 | compile the deepest default program | 169 | 31.1 KiB | 30.9 KiB | 23.4 KiB |
-| run the README rule | 18 | 1.3 KiB | 1005 B | 344 B |
-| run the sum loop, n = 1000 | 10 | 1.1 KiB | 901 B | 301 B |
-| run the call loop, n = 1000, sync executor | 3009 | 112.5 KiB | 1012 B | 298 B |
-| run the call loop, n = 1000, async executor | 4009 | 182.8 KiB | 1.1 KiB | 298 B |
-| JSON in, run, JSON out (README rule) | 164 | 12.7 KiB | 6.6 KiB | 152 B |
-| JSON in, run, JSON out (README rule, compiled once) | 19 | 1.4 KiB | 978 B | 152 B |
-| Tokio: 64 runs of the call loop (n = 100), one by one | 19712 | 780.6 KiB | 1012 B | 0 B |
-| Tokio: 64 runs of the call loop (n = 100), concurrently | 19777 | 837.1 KiB | 80.3 KiB | 0 B |
+| run the README rule | 15 | 1.3 KiB | 980 B | 328 B |
+| run the sum loop, n = 1000 | 8 | 1.1 KiB | 888 B | 288 B |
+| run the call loop, n = 1000, sync executor | 1008 | 94.9 KiB | 984 B | 288 B |
+| run the call loop, n = 1000, async executor | 2008 | 165.2 KiB | 1.0 KiB | 288 B |
+| JSON in, run, JSON out (README rule) | 108 | 7.5 KiB | 6.0 KiB | 152 B |
+| JSON in, run, JSON out (README rule, compiled once) | 16 | 1.3 KiB | 953 B | 152 B |
+| Tokio: 64 runs of the call loop (n = 100), one by one | 6848 | 667.5 KiB | 984 B | 0 B |
+| Tokio: 64 runs of the call loop (n = 100), concurrently | 6915 | 724.1 KiB | 77.4 KiB | 112 B |
 
 "Retained" is the size of what the scenario returns: a compiled program's
 footprint, or a run's result. The WebAssembly table also reports the
 module's linear memory, which includes the benchmark harness's own buffers.
-The compile scenarios measure compiling alone: their programs are built
-before they start. (Until 0.10 they built them inside, which counted every
-node of the program as compiling's work.)
+The compile and JSON scenarios measure their own work alone: their
+programs, and the rule's JSON text, are built before they start. (Until
+0.10 they were built inside, which counted every node of the program as
+compiling's work.)
 
 ### What they show
 
@@ -162,13 +163,13 @@ node of the program as compiling's work.)
   loops grow, and a run's peak memory stays around 1 KiB however many steps
   it takes. Variable lookups don't slow down with the size of the scope.
 - **Expressions and assignments don't allocate as they run**: the sum loop
-  makes 10 allocations in all, however many passes it takes. A call of a
-  synchronous executor makes 3 — its input map and a name for each of its
-  two arguments — which is what's left in a run. (Until 0.10 it made 5: the
-  function's name was copied for each call, and its result boxed.)
+  makes 9 allocations in all, however many passes it takes. A call of a
+  synchronous executor makes 1: its input map's entries. (Until 0.10 it
+  made 5: the function's name and each argument's name were copied for
+  each call, and its result boxed.)
 - **Compile once.** Parsing and compiling the README rule costs about five
-  times what running it does: a JSON host pays 15 µs and 164 allocations a
-  row if it compiles the rule each time, 2.6 µs and 19 if it compiles it
+  times what running it does: a JSON host pays 15 µs and 108 allocations a
+  row if it compiles the rule each time, 2.6 µs and 16 if it compiles it
   once. Parsing itself is mostly building the value tree (serde_json reads
   the rule's text in well under 1 µs), so a faster parser or a binary
   format would save little.
@@ -182,14 +183,16 @@ node of the program as compiling's work.)
   machine: compiling is 32–37% faster, with less than half the allocations
   (45 against 98 for the README rule, measuring compiling alone), since it
   no longer copies the program and builds a node's error paths only when
-  there's an error to report. Runs that call executors are 15–25% faster
-  (`run/call_loop` 25%, `run/readme` 16%): a call shares the function's
-  name rather than copying it, a synchronous executor's result isn't
-  boxed, and arguments aren't checked for duplicates they can't have.
-  Loops of expressions are 11–16% faster (`run/sum_loop`, `run/lookup/4`):
+  there's an error to report. Runs that call executors are 20–35% faster
+  (`run/call_loop` 35%, `run/readme` 21%, `json/compiled_once` 21%), and
+  CodyScript function calls 12%: a call shares the function's name and its arguments' names (`Map`
+  keys are `Arc<str>`) rather than copying them, a synchronous executor's
+  result isn't boxed, and arguments aren't checked for duplicates they
+  can't have. Scopes past 8 variables are about 5% slower to read
+  (`run/lookup/64`), where a third of the time is hashing the name.
+  Loops of expressions are 9–15% faster (`run/sum_loop`, `run/lookup/4`):
   short variable names are compared in place, and the evaluator's inline
-  stacks are smaller. Scopes past 8 variables, which look names up by hash,
-  are unchanged (`run/lookup/64`).
+  stacks are smaller.
 - **WebAssembly in Node runs at 1.1–1.8× native time**, close to native for
   large compiles.
 - **Async costs little natively.** A yielding executor adds about 0.2 µs per

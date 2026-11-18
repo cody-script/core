@@ -98,7 +98,7 @@ enum Task<'p> {
     /// variables.
     Invoke(&'p Call, &'p Input),
     /// Assign the value to this variable in the current scope.
-    Assign(&'p str),
+    Assign(&'p Arc<str>),
     /// End the current block with the value.
     Return,
     /// Run `then` if the value (`test`'s) is `true`, else `otherwise`.
@@ -227,12 +227,13 @@ impl<'p> Machine<'p, '_> {
             Task::Execute(ins) => self.execute::<DEBUGGED>(ins)?,
             Task::Assign(name) => {
                 let value = self.pop();
-                // Reassigning, the usual case in a loop, needs no new name.
+                // Reassigning, the usual case in a loop, needs no new name;
+                // a new variable shares the program's.
                 let scope = self.scope();
                 match scope.get_mut(name) {
                     Some(slot) => *slot = value,
                     None => {
-                        scope.insert(name.to_owned(), value);
+                        scope.insert(Arc::clone(name), value);
                     }
                 }
             }
@@ -438,9 +439,9 @@ impl<'p> Machine<'p, '_> {
 
     /// The arguments on the value stack, by name, taken off it. (A call's
     /// argument names are distinct: they're an object's keys.)
-    fn arguments(&mut self, args: &[(String, Input)]) -> Map {
+    fn arguments(&mut self, args: &[(Arc<str>, Input)]) -> Map {
         let at = self.values.len().saturating_sub(args.len());
-        let names = args.iter().map(|(name, _)| name.clone());
+        let names = args.iter().map(|(name, _)| Arc::clone(name));
         Map::from_unique(names.zip(self.values.drain(at..)).collect())
     }
 

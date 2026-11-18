@@ -157,7 +157,7 @@ pub fn to_serde_json(value: &Value) -> serde_json::Value {
         Value::Array(items) => serde_json::Value::Array(items.iter().map(to_serde_json).collect()),
         Value::Object(map) => serde_json::Value::Object(
             map.iter()
-                .map(|(k, v)| (k.clone(), to_serde_json(v)))
+                .map(|(k, v)| (k.to_owned(), to_serde_json(v)))
                 .collect(),
         ),
     }

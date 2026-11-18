@@ -4,8 +4,9 @@
 /// `false`, numbers, strings, `[lists]` and `{ "objects": … }`, nested freely.
 /// Anything else is an expression converted with `Value::from`, so Rust
 /// variables and function calls can be spliced in. Object keys are string
-/// literals or any expression that converts into a `String` (parenthesize
-/// complex ones); they keep the order they're written in.
+/// literals or any expression that converts into an `Arc<str>` — a `&str`,
+/// a `String` — (parenthesize complex ones); they keep the order they're
+/// written in.
 ///
 /// ```
 /// use codyscript_core::{value, Value};
@@ -64,12 +65,12 @@ macro_rules! __value {
     (@object $object:ident () ()) => {};
     // Insert an entry, then carry on after its comma.
     (@object $object:ident [$($key:tt)+] ($value:expr) , $($rest:tt)*) => {
-        let _ = $object.insert(::std::string::String::from($($key)+), $value);
+        let _ = $object.insert($($key)+, $value);
         $crate::__value!(@object $object () ($($rest)*));
     };
     // Insert the last entry.
     (@object $object:ident [$($key:tt)+] ($value:expr)) => {
-        let _ = $object.insert(::std::string::String::from($($key)+), $value);
+        let _ = $object.insert($($key)+, $value);
     };
     // The value after a key's colon.
     (@object $object:ident ($($key:tt)+) (: null $($rest:tt)*)) => {
@@ -161,7 +162,7 @@ mod tests {
         assert_eq!(v["list"][2]["a"], 3);
         assert_eq!(v["dynamic"], -2);
         assert_eq!(v["nested"]["t"], true);
-        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["list", "dynamic", "nested"]);
     }
 

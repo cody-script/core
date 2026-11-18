@@ -224,7 +224,12 @@ side at the program's root:
 
 [`Value`] is an enum of `Null`, `Bool`, `Number`, `String`, `Array` and
 `Object`. [`Map`] (an object) keeps insertion order and looks keys up through
-a hash index once it outgrows a short scan; equality ignores order.
+a hash index once it outgrows a short scan; equality ignores order. Its keys
+are `Arc<str>`, so cloning a map, or reusing a name as a key, shares them
+rather than copying: a program's argument and variable names become keys at
+every call and every `set` without allocating. `insert` takes any
+`impl Into<Arc<str>>` (`&str`, `String`, `Arc<str>`); iterating yields
+`(&str, &Value)`, and an owned map yields `(Arc<str>, Value)`.
 [`Number`] holds an integer exactly or any `f64`, including `NaN` and the
 infinities that formats like YAML and CBOR can express — `compile` refuses
 them in programs.
@@ -502,14 +507,23 @@ for history only.
 The program format, behaviour, messages and error codes are unchanged.
 Compiling is 32–37% faster and allocates less than half as much; a
 compiled program takes 20–50% less memory. Runs that call executors are
-15–25% faster, and loops that read variables 7–16%. What changed in the
-API:
+20–35% faster, CodyScript function calls about 12%, and loops of
+expressions 9–15%; reading a scope of more than 8 variables is about 5%
+slower. What changed in the API:
 
 - **`CompiledProgram::program()` is removed**: a compiled program no
   longer keeps a copy of the program it was compiled from. Keep the
   program yourself if you need it after compiling.
 - **`Engine::compile_owned(program)` is removed**: it existed only to skip
   that copy. Use `engine.compile(&program)`, which no longer copies.
+- **`Map`'s keys are `Arc<str>`**, shared rather than copied: an executor
+  call's arguments and a run's new variables take their names from the
+  program without allocating, and cloning an object shares its keys.
+  `map.insert(key, value)` takes any `impl Into<Arc<str>>`, so write
+  `map.insert("a", v)` (not `"a".into()`, which no longer infers).
+  `keys()` and `iter()` yield `&str` rather than `&String`; an owned map
+  yields `(Arc<str>, Value)`; `FromIterator` and `Extend` take any key
+  that converts into an `Arc<str>`.
 - **`ExecutorCall`'s `op`, `arg` and `signal` are methods**, no longer
   fields: `call.op()` (a `&str`: `match call.op() { "trim" => … }`),
   `call.arg()` (`Option<&Value>`), `call.signal()`. The function's name

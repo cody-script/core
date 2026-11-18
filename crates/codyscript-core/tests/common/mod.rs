@@ -100,11 +100,7 @@ pub fn tagged(mut node: Value, tag: &str) -> Value {
 /// An object's keys, in order.
 #[track_caller]
 pub fn keys(v: &Value) -> Vec<&str> {
-    v.as_object()
-        .expect("an object")
-        .keys()
-        .map(String::as_str)
-        .collect()
+    v.as_object().expect("an object").keys().collect()
 }
 
 /// An object's entries, for variables.

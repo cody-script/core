@@ -138,8 +138,8 @@ pub fn fee_variables() -> Variables {
 /// `count` variables, `v0`…, then `last` (1) and `n`.
 pub fn many_variables(count: usize, n: u64) -> Variables {
     let mut variables: Variables = (0..count).map(|i| (format!("v{i}"), i)).collect();
-    variables.insert("last".into(), Value::from(1));
-    variables.insert("n".into(), Value::from(n));
+    variables.insert("last", Value::from(1));
+    variables.insert("n", Value::from(n));
     variables
 }
 
@@ -306,6 +306,7 @@ pub fn memory_scenarios() -> Vec<MemoryScenario> {
     // Built here, not in the scenarios: compiling borrows a program, and
     // building one isn't the work being measured.
     let (rule, wide, deep) = (readme_rule(), wide_program(100), deep_program());
+    let rule_text = rule_json.clone();
     vec![
         (
             "parse the README rule from JSON",
@@ -344,7 +345,7 @@ pub fn memory_scenarios() -> Vec<MemoryScenario> {
             Box::new(move || {
                 keep(json_end_to_end(
                     &engine,
-                    &readme_rule_json(),
+                    &rule_text,
                     r#"{"Name":"  Ada  "}"#,
                 ))
             }),

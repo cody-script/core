@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::iter::FusedIterator;
 use std::ops::Index;
+use std::sync::Arc;
 use std::{slice, vec};
 
 use super::Value;
@@ -18,14 +19,18 @@ const INDEX_THRESHOLD: usize = 8;
 ///
 /// Re-inserting a key replaces its value and keeps its place. Two maps are
 /// equal when they hold the same entries, in any order.
+///
+/// Keys are `Arc<str>`: shared, not copied, when a map is cloned or a key
+/// is reused — a program's names, say, which become the keys of every call's
+/// arguments and of the variables it sets.
 #[derive(Clone, Default)]
 pub struct Map {
-    entries: Vec<(String, Value)>,
+    entries: Vec<(Arc<str>, Value)>,
     /// Key → position in `entries`; built once the map outgrows a scan.
     /// Boxed, since most maps never need one: a `HashMap` inline would more
     /// than double the size of a `Map`, and so of every `Value`.
     #[allow(clippy::box_collection)]
-    index: Option<Box<HashMap<String, usize>>>,
+    index: Option<Box<HashMap<Arc<str>, usize>>>,
 }
 
 impl Map {
@@ -44,7 +49,7 @@ impl Map {
 
     /// A map of `entries`, whose keys are known to be distinct (a call's
     /// arguments): built without checking each key against the others.
-    pub(crate) fn from_unique(entries: Vec<(String, Value)>) -> Self {
+    pub(crate) fn from_unique(entries: Vec<(Arc<str>, Value)>) -> Self {
         let mut map = Map {
             entries,
             index: None,
@@ -94,7 +99,8 @@ impl Map {
 
     /// Sets `key` to `value`, returning the value it replaces. A new key goes
     /// last; an existing one keeps its place.
-    pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
+    pub fn insert(&mut self, key: impl Into<Arc<str>>, value: Value) -> Option<Value> {
+        let key = key.into();
         if let Some(i) = self.position(&key) {
             return Some(std::mem::replace(&mut self.entries[i].1, value));
         }
@@ -104,7 +110,11 @@ impl Map {
 
     /// Inserts `key` if it's new; if it isn't, changes nothing and hands
     /// both back.
-    pub(crate) fn insert_new(&mut self, key: String, value: Value) -> Result<(), (String, Value)> {
+    pub(crate) fn insert_new(
+        &mut self,
+        key: Arc<str>,
+        value: Value,
+    ) -> Result<(), (Arc<str>, Value)> {
         if self.position(&key).is_some() {
             return Err((key, value));
         }
@@ -117,7 +127,7 @@ impl Map {
         let i = match self.position(key) {
             Some(i) => i,
             None => {
-                self.push(key.to_owned(), Value::Null);
+                self.push(key.into(), Value::Null);
                 self.entries.len() - 1
             }
         };
@@ -125,9 +135,9 @@ impl Map {
     }
 
     /// Adds an entry last, for a key that isn't there.
-    fn push(&mut self, key: String, value: Value) {
+    fn push(&mut self, key: Arc<str>, value: Value) {
         if let Some(index) = &mut self.index {
-            index.insert(key.clone(), self.entries.len());
+            index.insert(Arc::clone(&key), self.entries.len());
         }
         self.entries.push((key, value));
         if self.index.is_none() && self.entries.len() > INDEX_THRESHOLD {
@@ -160,7 +170,7 @@ impl Map {
             .entries
             .iter()
             .enumerate()
-            .map(|(i, (k, _))| (k.clone(), i))
+            .map(|(i, (k, _))| (Arc::clone(k), i))
             .collect();
         self.index = Some(Box::new(index));
     }
@@ -206,7 +216,7 @@ impl Index<&str> for Map {
     }
 }
 
-impl<K: Into<String>, V: Into<Value>> FromIterator<(K, V)> for Map {
+impl<K: Into<Arc<str>>, V: Into<Value>> FromIterator<(K, V)> for Map {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let mut map = Map::new();
         map.extend(iter);
@@ -214,16 +224,16 @@ impl<K: Into<String>, V: Into<Value>> FromIterator<(K, V)> for Map {
     }
 }
 
-impl<K: Into<String>, V: Into<Value>> Extend<(K, V)> for Map {
+impl<K: Into<Arc<str>>, V: Into<Value>> Extend<(K, V)> for Map {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         for (k, v) in iter {
-            self.insert(k.into(), v.into());
+            self.insert(k, v.into());
         }
     }
 }
 
 impl IntoIterator for Map {
-    type Item = (String, Value);
+    type Item = (Arc<str>, Value);
     type IntoIter = IntoIter;
 
     fn into_iter(self) -> IntoIter {
@@ -232,7 +242,7 @@ impl IntoIterator for Map {
 }
 
 impl<'a> IntoIterator for &'a Map {
-    type Item = (&'a String, &'a Value);
+    type Item = (&'a str, &'a Value);
     type IntoIter = Iter<'a>;
 
     fn into_iter(self) -> Iter<'a> {
@@ -242,13 +252,13 @@ impl<'a> IntoIterator for &'a Map {
 
 /// A [`Map`]'s entries, in order.
 #[derive(Clone, Debug)]
-pub struct Iter<'a>(slice::Iter<'a, (String, Value)>);
+pub struct Iter<'a>(slice::Iter<'a, (Arc<str>, Value)>);
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = (&'a String, &'a Value);
+    type Item = (&'a str, &'a Value);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|(k, v)| (k, v))
+        self.0.next().map(|(k, v)| (&**k, v))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -258,7 +268,7 @@ impl<'a> Iterator for Iter<'a> {
 
 impl DoubleEndedIterator for Iter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.0.next_back().map(|(k, v)| (k, v))
+        self.0.next_back().map(|(k, v)| (&**k, v))
     }
 }
 
@@ -267,13 +277,13 @@ impl FusedIterator for Iter<'_> {}
 
 /// A [`Map`]'s keys, in order.
 #[derive(Clone, Debug)]
-pub struct Keys<'a>(slice::Iter<'a, (String, Value)>);
+pub struct Keys<'a>(slice::Iter<'a, (Arc<str>, Value)>);
 
 impl<'a> Iterator for Keys<'a> {
-    type Item = &'a String;
+    type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|(k, _)| k)
+        self.0.next().map(|(k, _)| &**k)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -283,7 +293,7 @@ impl<'a> Iterator for Keys<'a> {
 
 impl DoubleEndedIterator for Keys<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.0.next_back().map(|(k, _)| k)
+        self.0.next_back().map(|(k, _)| &**k)
     }
 }
 
@@ -292,7 +302,7 @@ impl FusedIterator for Keys<'_> {}
 
 /// A [`Map`]'s values, in order.
 #[derive(Clone, Debug)]
-pub struct Values<'a>(slice::Iter<'a, (String, Value)>);
+pub struct Values<'a>(slice::Iter<'a, (Arc<str>, Value)>);
 
 impl<'a> Iterator for Values<'a> {
     type Item = &'a Value;
@@ -317,10 +327,10 @@ impl FusedIterator for Values<'_> {}
 
 /// A [`Map`]'s entries, owned, in order.
 #[derive(Debug)]
-pub struct IntoIter(vec::IntoIter<(String, Value)>);
+pub struct IntoIter(vec::IntoIter<(Arc<str>, Value)>);
 
 impl Iterator for IntoIter {
-    type Item = (String, Value);
+    type Item = (Arc<str>, Value);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
@@ -345,16 +355,16 @@ mod tests {
     use super::*;
 
     fn keys(map: &Map) -> Vec<&str> {
-        map.keys().map(String::as_str).collect()
+        map.keys().collect()
     }
 
     #[test]
     fn keeps_insertion_order_and_replaces_in_place() {
         let mut map = Map::new();
         for key in ["z", "a", "m"] {
-            map.insert(key.into(), Value::from(1));
+            map.insert(key, Value::from(1));
         }
-        assert_eq!(map.insert("a".into(), Value::from(2)), Some(Value::from(1)));
+        assert_eq!(map.insert("a", Value::from(2)), Some(Value::from(1)));
         assert_eq!(keys(&map), ["z", "a", "m"]);
         assert_eq!(map["a"], Value::from(2));
     }
@@ -363,14 +373,14 @@ mod tests {
     fn works_the_same_past_the_index_threshold() {
         let mut map: Map = (0..100).rev().map(|i| (format!("k{i}"), i)).collect();
         assert_eq!(map.len(), 100);
-        assert_eq!(map.keys().next().map(String::as_str), Some("k99"));
+        assert_eq!(map.keys().next(), Some("k99"));
         assert_eq!(map.get("k7"), Some(&Value::from(7)));
         assert_eq!(map.remove("k50"), Some(Value::from(50)));
         assert_eq!(map.get("k49"), Some(&Value::from(49)));
         assert!(!map.contains_key("k50"));
         assert_eq!(map.len(), 99);
         *map.get_or_insert_null("new") = Value::from(true);
-        assert_eq!(map.keys().next_back().map(String::as_str), Some("new"));
+        assert_eq!(map.keys().next_back(), Some("new"));
         assert_eq!(map.get("new"), Some(&Value::from(true)));
         map.clear();
         assert!(map.is_empty() && map.get("k1").is_none());
@@ -383,7 +393,7 @@ mod tests {
             assert!(map.remove(removed).is_some());
             assert_eq!(map.get(removed), None);
         }
-        map.insert("k7".into(), Value::from(70));
+        map.insert("k7", Value::from(70));
         for (i, (key, value)) in map.iter().enumerate() {
             assert_eq!(map.get(key), Some(value), "{key}");
             assert_eq!(map.position(key), Some(i), "{key}");

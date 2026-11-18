@@ -319,7 +319,7 @@ impl Walk<'_> {
         v: &'v Value,
         (parent, key): (&str, &str),
         depth: usize,
-    ) -> Option<(&'v String, &'v Value)> {
+    ) -> Option<(&'v str, &'v Value)> {
         if let Value::Object(map) = v
             && map.len() == 1
             && depth < self.max_depth
@@ -451,7 +451,7 @@ impl Walk<'_> {
                     format!("\"{name}\" is both defined in \"fn\" and declared in \"ext\"");
                 self.fail(child(&path, name), message);
             }
-            self.functions.insert(name.clone(), index);
+            self.functions.insert(name.to_owned(), index);
         }
         Some(table)
     }
@@ -465,7 +465,7 @@ impl Walk<'_> {
             let body = self.input(body, child(&path, name), 2);
             match (body, functions.as_mut()) {
                 (Some(body), Some(list)) => list.push(Function {
-                    name: name.clone(),
+                    name: name.to_owned(),
                     body,
                 }),
                 _ => functions = None,
@@ -608,7 +608,12 @@ impl Walk<'_> {
     }
 
     /// A call's arguments, `{ <name>: <input>, … }`, in order.
-    fn arguments(&mut self, args: &Value, at: &str, depth: usize) -> Option<Vec<(String, Input)>> {
+    fn arguments(
+        &mut self,
+        args: &Value,
+        at: &str,
+        depth: usize,
+    ) -> Option<Vec<(Arc<str>, Input)>> {
         let map = self.record(args, at, depth, None)?;
         let mut list = Some(Vec::with_capacity(map.len()));
         for (arg, from) in map {
@@ -619,7 +624,7 @@ impl Walk<'_> {
             }
             let input = self.input(from, arg_path, depth + 1);
             match (input, list.as_mut()) {
-                (Some(input), Some(list)) => list.push((arg.clone(), input)),
+                (Some(input), Some(list)) => list.push((arg.into(), input)),
                 _ => list = None,
             }
         }
@@ -638,7 +643,7 @@ impl Walk<'_> {
                 }
                 let to = self.input(to, descendant(&path, &["set", name]), depth + 2)?;
                 InstructionKind::Set {
-                    name: name.clone(),
+                    name: name.into(),
                     to,
                 }
             }
