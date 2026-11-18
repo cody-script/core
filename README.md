@@ -19,7 +19,7 @@ licensed.
 
 | Crate | What it is | Depends on |
 |---|---|---|
-| [`codyscript-core`](crates/codyscript-core) | The interpreter: data model (`Value`), validation, expressions, engine, errors. Knows no data format. | `serde` |
+| [`codyscript-core`](crates/codyscript-core) | The interpreter: data model (`Value`), validation, expressions, engine, debugger, errors. Knows no data format. | `serde` |
 | [`codyscript-json`](crates/codyscript-json) | JSON: parse and print programs and values, the language's JSON Schema, `serde_json` interop. | `codyscript-core`, `serde_json` |
 | [`codyscript-wasm`](crates/codyscript-wasm) | WebAssembly bindings: run JSON programs from JavaScript, with JavaScript executors (sync or async). Not published. | `codyscript-json`, `wasm-bindgen` |
 | [`codyscript-playground`](crates/codyscript-playground) | A page for smoke-testing the WebAssembly build in a browser, served by `axum`. Not published. | `axum`, `wasm-bindgen-cli-support` |
@@ -108,6 +108,15 @@ for row in rows_json {
 `compile` checks the program's shape, depth, expression syntax, every call,
 and that the host provides every function it declares, up front — so a
 broken rule fails when it's saved, not halfway through a file. In async code, `rule.run(options).await` instead.
+
+A host can also **debug** a rule: `rule.debug(options, breakpoints,
+debugger)` pauses it at breakpoints — any step can have one, named by its
+tag or path — to show its variables and call stack, then steps over, into,
+on or stops as the debugger says. A rule's variables and breakpoints can be
+kept beside it, apart from the rule, as a *run configuration*: a JSON
+document with [its own schema](crates/codyscript-json/run-config.schema.json). See the core README's
+[Debugging](crates/codyscript-core/README.md#debugging), and try it in the
+playground, below.
 
 ## WebAssembly
 

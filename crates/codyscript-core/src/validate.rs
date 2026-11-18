@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::error::{Details, Error, ErrorCode, Issue};
 use crate::expression::{Ast, parse};
 use crate::program::{
-    Call, Expression, External, Input, InputKind, Instruction, InstructionKind, Program,
+    Call, Expression, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
 };
 use crate::value::{Map, Value};
 
@@ -70,8 +70,8 @@ fn field<'v>(node: &'v Map, key: &str) -> &'v Value {
 enum Target {
     /// One of the program's functions, by index.
     Function(usize),
-    /// An external function: its executor id and name within it.
-    External(String, String),
+    /// An external function: its name, and where its first dot is.
+    External(String, usize),
 }
 
 struct RawIssue {
@@ -152,8 +152,8 @@ struct Walk<'a> {
     /// The program's own functions (`fn`) by name, with their index.
     functions: HashMap<String, usize>,
     /// The external functions it declares (`ext`) by full name
-    /// (`text.trim`), with their executor id and name within it.
-    externals: HashMap<String, (String, String)>,
+    /// (`text.trim`), with where their first dot is.
+    externals: HashMap<String, usize>,
     issues: Vec<RawIssue>,
 }
 
@@ -391,7 +391,7 @@ impl Walk<'_> {
                         tag: None,
                     });
                 }
-                self.externals.insert(name, (exe.clone(), op.to_owned()));
+                self.externals.insert(name, exe.len());
             }
         }
     }
@@ -419,13 +419,16 @@ impl Walk<'_> {
 
     /// Every function in `fn`, each a program of its own, in order; `None`
     /// if any is invalid (each is checked, even after one fails).
-    fn function_bodies(&mut self, table: &Map) -> Option<Vec<Input>> {
+    fn function_bodies(&mut self, table: &Map) -> Option<Vec<Function>> {
         let path = child("", FUNCTIONS);
         let mut functions = Some(Vec::with_capacity(table.len()));
         for (name, body) in table {
             let body = self.input(body, &child(&path, name), 2);
             match (body, functions.as_mut()) {
-                (Some(body), Some(list)) => list.push(body),
+                (Some(body), Some(list)) => list.push(Function {
+                    name: name.clone(),
+                    body,
+                }),
                 _ => functions = None,
             }
         }
@@ -528,9 +531,9 @@ impl Walk<'_> {
         }
         Some(match call? {
             (Target::Function(function), args) => InputKind::Call(Call { function, args }),
-            (Target::External(exe, op), args) => InputKind::External(External {
-                exe,
-                op,
+            (Target::External(name, dot), args) => InputKind::External(External {
+                name,
+                dot,
                 args,
                 arg: arg.cloned(),
             }),
@@ -543,8 +546,8 @@ impl Walk<'_> {
         if let Some(&index) = self.functions.get(name) {
             return Some(Target::Function(index));
         }
-        if let Some((exe, op)) = self.externals.get(name) {
-            return Some(Target::External(exe.clone(), op.clone()));
+        if let Some(&dot) = self.externals.get(name) {
+            return Some(Target::External(name.to_owned(), dot));
         }
         // Most likely a host function the program forgot to declare.
         let provided = name

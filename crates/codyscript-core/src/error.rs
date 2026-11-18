@@ -39,8 +39,12 @@ pub enum ErrorCode {
     StepLimit,
     /// Function calls nested more than `max_depth` deep.
     DepthLimit,
-    /// The run's [`Signal`](crate::Signal) was aborted.
+    /// The run's [`Signal`](crate::Signal) was aborted, or its debugger
+    /// stopped it.
     Aborted,
+    /// A [run configuration](crate::RunConfig) doesn't fit its program: a
+    /// breakpoint names no step.
+    InvalidConfig,
 }
 
 impl ErrorCode {
@@ -55,6 +59,7 @@ impl ErrorCode {
             ErrorCode::StepLimit => "step_limit",
             ErrorCode::DepthLimit => "depth_limit",
             ErrorCode::Aborted => "aborted",
+            ErrorCode::InvalidConfig => "invalid_config",
         }
     }
 }
@@ -78,10 +83,12 @@ pub struct Issue {
 #[derive(Clone, Default)]
 pub struct Details {
     /// JSON Pointer into the program (`/do/2/set/x`); empty for the root.
+    /// For `invalid_config`, into the run configuration (`/breakpoints/0`).
     pub path: Option<String>,
     /// The node's `tag`.
     pub tag: Option<String>,
-    /// Every problem found, for `invalid_program` / `unknown_function`.
+    /// Every problem found, for `invalid_program`, `unknown_function` and
+    /// `invalid_config`.
     pub issues: Option<Vec<Issue>>,
     /// What caused this error, reported as its [`source`](StdError::source).
     pub cause: Option<Cause>,
@@ -156,6 +163,7 @@ impl Error {
     }
 
     /// JSON Pointer to the node that failed; `""` for the program's root.
+    /// For `invalid_config`, to the run configuration's first problem.
     pub fn path(&self) -> &str {
         &self.path
     }
@@ -165,8 +173,8 @@ impl Error {
         self.tag.as_deref()
     }
 
-    /// For `invalid_program` / `unknown_function`: every problem found, not
-    /// just the first.
+    /// For `invalid_program`, `unknown_function` and `invalid_config`: every
+    /// problem found, not just the first.
     pub fn issues(&self) -> Option<&[Issue]> {
         self.issues.as_deref()
     }

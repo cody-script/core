@@ -265,6 +265,223 @@ fn version_and_schema() {
     assert_eq!(schema["title"], "CodyScript program");
 }
 
+// ── Debugging, through the JavaScript bindings ──────────────────────────────
+
+/// A JavaScript function of `pause`.
+fn on_pause(body: &str) -> Function {
+    Function::new_with_args("pause", body)
+}
+
+/// Debugs through the exported binding, with a run configuration (JSON
+/// text); the outcome, parsed, or why it rejected.
+async fn debug(program: &str, config: &str, on_pause: Function) -> Result<Value, String> {
+    let outcome = codyscript_wasm::debug(
+        program.into(),
+        config.into(),
+        text_executor(),
+        "".into(),
+        on_pause,
+    )
+    .await
+    .map_err(|e| String::from(js_sys::Error::from(JsValue::from(e)).message()))?;
+    Ok(codyscript_json::from_str(&outcome).unwrap())
+}
+
+/// What `globalThis[name]` holds, as a CodyScript value.
+fn global(name: &str) -> Value {
+    let value = Reflect::get(&js_sys::global(), &name.into()).unwrap();
+    let json = js_sys::JSON::stringify(&value).unwrap();
+    codyscript_json::from_str(&String::from(json)).unwrap()
+}
+
+#[wasm_bindgen_test]
+async fn javascript_sets_breakpoints_and_steps_taking_its_time() {
+    // At the breakpoint, a step over, answered later, from a timer, as a
+    // person clicking a button would — clearing the breakpoints too.
+    let debugger = on_pause(
+        r#"(globalThis.__cody_pauses ??= []).push(pause);
+           if (pause.reason === "step") return "continue";
+           return new Promise((resolve) =>
+             setTimeout(() => resolve({ action: "stepOver", breakpoints: [] }), 5));"#,
+    );
+    // The `if`, by its tag.
+    let config =
+        r#"{ "variables": { "Name": "  Ada " }, "breakpoints": [{ "tag": "name-required" }] }"#;
+    let outcome = debug(README_RULE, config, debugger).await.unwrap();
+    assert_eq!(outcome["ok"], true);
+    assert_eq!(outcome["value"], "Ada");
+    assert_eq!(outcome["steps"], 8);
+    let pauses = global("__cody_pauses");
+    assert_eq!(pauses.as_array().unwrap().len(), 2);
+    assert_eq!(pauses[0]["path"], "/do/1");
+    assert_eq!(pauses[0]["reason"], "breakpoint");
+    assert_eq!(pauses[0]["kind"], "if");
+    assert_eq!(pauses[0]["tag"], "name-required");
+    assert_eq!(pauses[0]["depth"], 0);
+    assert_eq!(
+        pauses[0]["breakpoints"],
+        value!([{ "tag": "name-required" }])
+    );
+    assert_eq!(
+        pauses[0]["frames"],
+        value!([{ "scopes": [{ "Name": "  Ada ", "name": "Ada" }] }])
+    );
+    assert_eq!(pauses[1]["path"], "/do/2");
+    assert_eq!(pauses[1]["reason"], "step");
+    assert_eq!(pauses[1]["breakpoints"], value!([]));
+}
+
+#[wasm_bindgen_test]
+async fn with_no_breakpoints_it_never_pauses() {
+    let never = on_pause("throw new Error('unreachable');");
+    let config = r#"{ "variables": { "Name": "  Ada " } }"#;
+    let outcome = debug(README_RULE, config, never).await;
+    assert_eq!(outcome.unwrap()["value"], "Ada");
+}
+
+#[wasm_bindgen_test]
+async fn stepping_into_a_codyscript_function_shows_the_call_stack() {
+    let program = r#"{
+        "fn": { "double": { "do": [{ "ret": { "x": "v * 2" } }] } },
+        "do": [{ "ret": { "call": { "double": { "v": { "ref": "n" } } } } }] }"#;
+    let debugger = on_pause(
+        r#"(globalThis.__cody_stack ??= []).push(pause.frames);
+           return pause.path.startsWith("/fn/") ? "continue" : "stepInto";"#,
+    );
+    let config = r#"{ "variables": { "n": 21 }, "breakpoints": [{ "path": "/do/0" }] }"#;
+    let outcome = debug(program, config, debugger).await.unwrap();
+    assert_eq!(outcome["value"], 42);
+    let stacks = global("__cody_stack");
+    let last = &stacks[stacks.as_array().unwrap().len() - 1];
+    assert_eq!(
+        *last,
+        value!([
+            { "scopes": [{ "n": 21 }] },
+            { "function": "double", "call": "/do/0/ret", "scopes": [{ "v": 21 }] }
+        ])
+    );
+}
+
+#[wasm_bindgen_test]
+async fn stop_ends_the_run_with_aborted() {
+    let config = r#"{ "variables": { "Name": "x" }, "breakpoints": [{ "path": "/do/0" }] }"#;
+    let outcome = debug(README_RULE, config, on_pause(r#"return "stop";"#))
+        .await
+        .unwrap();
+    assert_eq!(outcome["ok"], false);
+    assert_eq!(outcome["error"]["code"], "aborted");
+    assert_eq!(
+        outcome["error"]["message"],
+        "Run stopped by the debugger at /do/0"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_failing_or_confused_debugger_rejects() {
+    let at = r#"{ "breakpoints": [{ "path": "/do/0" }] }"#;
+    let thrown = debug(README_RULE, at, on_pause("throw new Error('oops');")).await;
+    assert_eq!(thrown.unwrap_err(), "onPause: oops");
+    let rejected = debug(README_RULE, at, on_pause("return Promise.reject('no');")).await;
+    assert_eq!(rejected.unwrap_err(), "onPause: no");
+    for (body, got) in [
+        ("return 'jump';", r#""jump""#),
+        ("return;", "undefined"),
+        ("return { breakpoints: [] };", r#"{"breakpoints":[]}"#),
+    ] {
+        let confused = debug(README_RULE, at, on_pause(body)).await.unwrap_err();
+        assert_eq!(
+            confused,
+            format!(
+                r#"onPause: expected "stepOver", "stepInto", "continue", "stop" or {{ action, breakpoints? }}, got {got}"#
+            ),
+            "{body}"
+        );
+    }
+    // A program that doesn't compile never pauses: it's an outcome.
+    let never = on_pause("throw new Error('unreachable');");
+    let outcome = debug(r#"{ "x": "1 +" }"#, at, never).await.unwrap();
+    assert_eq!(outcome["error"]["code"], "invalid_program");
+}
+
+#[wasm_bindgen_test]
+async fn a_run_configuration_must_fit_its_program() {
+    // A breakpoint that names no step: an outcome, listing each.
+    let never = || on_pause("throw new Error('unreachable');");
+    let config = r#"{ "breakpoints": [{ "tag": "name-requird" }, { "path": "/do/1" }, { "path": "/do/9" }] }"#;
+    let outcome = debug(README_RULE, config, never()).await.unwrap();
+    assert_eq!(outcome["ok"], false);
+    assert_eq!(outcome["error"]["code"], "invalid_config");
+    assert_eq!(
+        outcome["error"]["issues"],
+        value!([
+            { "path": "/breakpoints/0", "message": "No step has tag \"name-requird\"" },
+            { "path": "/breakpoints/2", "message": "No step at \"/do/9\"" }
+        ])
+    );
+    // `check` says the same without running it.
+    let checked = codyscript_wasm::check(
+        README_RULE.into(),
+        config.into(),
+        text_executor(),
+        "".into(),
+    );
+    let checked: Value = codyscript_json::from_str(&checked.unwrap()).unwrap();
+    assert_eq!(checked["error"], outcome["error"]);
+    let fine = r#"{ "breakpoints": [{ "tag": "name-required" }] }"#;
+    let checked =
+        codyscript_wasm::check(README_RULE.into(), fine.into(), text_executor(), "".into());
+    assert_eq!(checked.unwrap(), r#"{"ok":true}"#);
+    // Or one set at a pause: the run fails when it goes on.
+    let bad = on_pause(r#"return { action: "continue", breakpoints: [{ path: "/nope" }] };"#);
+    let outcome = debug(README_RULE, at_start(), bad).await.unwrap();
+    assert_eq!(outcome["error"]["code"], "invalid_config");
+    // What isn't a run configuration at all is a wrong argument.
+    for config in [
+        "[]",
+        r#"{ "breakpoints": ["/do/1"] }"#,
+        r#"{ "limits": {} }"#,
+    ] {
+        let rejected = debug(README_RULE, config, never()).await.unwrap_err();
+        assert!(rejected.starts_with("config: "), "{config}: {rejected}");
+    }
+    let schema: Value = codyscript_json::from_str(&codyscript_wasm::run_config_schema()).unwrap();
+    assert_eq!(schema["title"], "CodyScript run configuration");
+}
+
+/// A run configuration with a breakpoint at the first step.
+fn at_start() -> &'static str {
+    r#"{ "breakpoints": [{ "path": "/do/0" }] }"#
+}
+
+#[wasm_bindgen_test]
+fn steps_lists_what_breakpoints_can_name() {
+    let listed = codyscript_wasm::steps(README_RULE.into(), text_executor(), "".into()).unwrap();
+    let listed: Value = codyscript_json::from_str(&listed).unwrap();
+    assert_eq!(listed["ok"], true);
+    let steps = listed["steps"].as_array().unwrap();
+    // Every step, taken or not: a name that isn't blank skips the two of
+    // the `if`'s `ret`.
+    assert_eq!(steps.len(), 10);
+    assert_eq!(
+        steps[0],
+        value!({ "path": "/do/0", "kind": "set", "name": "name", "depth": 0 })
+    );
+    assert_eq!(
+        steps[1],
+        value!({ "path": "/do/0/set/name", "kind": "call", "name": "text.trim", "depth": 1 })
+    );
+    assert_eq!(steps[3]["tag"], "name-required");
+    let broken = codyscript_wasm::steps(
+        r#"{ "ext": { "nope": ["x"] }, "x": "1" }"#.into(),
+        JsValue::NULL,
+        "".into(),
+    )
+    .unwrap();
+    let broken: Value = codyscript_json::from_str(&broken).unwrap();
+    assert_eq!(broken["error"]["code"], "unknown_function");
+    assert!(codyscript_wasm::steps("1".into(), JsValue::NULL, "nope".into()).is_err());
+}
+
 // ── Stack use: WebAssembly's stack is 1 MiB by default ─────────────────────
 //
 // Running a program doesn't recurse, however deep it is; compiling does, up

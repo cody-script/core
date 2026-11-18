@@ -73,6 +73,17 @@ fn run(c: &mut Criterion) {
     c.bench_function("run/function_loop/1000", |b| {
         b.iter(|| functions.run_blocking(scenario::options(scenario::n(1_000))))
     });
+    let debugged = || {
+        let options = scenario::options(scenario::n(1_000));
+        sum.debug_blocking(
+            options,
+            scenario::at_the_end(&sum),
+            scenario::passing_debugger(),
+        )
+    };
+    // A run that fails (a breakpoint naming no step, say) would be quick.
+    assert_eq!(debugged().unwrap().steps, scenario::sum_loop_steps(1_000));
+    c.bench_function("debug/sum_loop/1000", |b| b.iter(debugged));
 }
 
 #[wasm_bindgen_bench]

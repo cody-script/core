@@ -223,8 +223,10 @@ them in programs.
   (`v["a"][0]`, `null` when missing).
 - Convert with any serde format: `Value`, `Map` and `Number` implement
   `Serialize` and `Deserialize`; so do `RunResult` (`{ value, variables,
-  steps }`), `Limits` (`{ maxSteps, maxDepth }`), `ErrorCode` and `Issue`,
-  and `Error` serializes as `{ code, message, path, tag?, issues? }`.
+  steps }`), `Limits` (`{ maxSteps, maxDepth }`), `RunConfig` (`{
+  variables, breakpoints }`, see [Debugging](#debugging)), `ErrorCode` and
+  `Issue`, and `Error` serializes as `{ code, message, path, tag?, issues?
+  }`.
 
 ## Host API
 
@@ -243,6 +245,9 @@ engine.compile(&program) -> Result<CompiledProgram, Error>
 engine.run(&program, options).await -> Result<RunResult, Error>   // compile + run
 engine.run_blocking(&program, options) -> Result<RunResult, Error>
 compiled.run(options).await / compiled.run_blocking(options)
+compiled.debug(options, breakpoints, debugger).await   // and debug_blocking
+compiled.steps() -> Vec<debug::Step>                       // what breakpoints name
+compiled.check(&run_config) -> Result<(), Error>           // its breakpoints name steps?
 compiled.program() -> &Value
 
 RunOptions::new().with_variables(map).with_signal(signal)  // or RunOptions::from(map)
@@ -276,11 +281,12 @@ RunResult { value: Value, variables: Map, steps: u64 }
   `aborted`, and executors receive the signal to stop their own work.
 - **Errors** — every failure is a `codyscript_core::Error` with a `code()`
   (`InvalidProgram`, `UnknownFunction`, `UndefinedVariable`, `TypeError`,
-  `FunctionFailed`, `StepLimit`, `DepthLimit`, `Aborted` — `code().as_str()`
-  gives `"invalid_program"` and so on), a JSON Pointer `path()` into the
-  program, the node's `tag()`, a `cause()` (an executor's error, an abort
-  reason) and, for `InvalidProgram` / `UnknownFunction`, every `issues()`
-  found. An
+  `FunctionFailed`, `StepLimit`, `DepthLimit`, `Aborted`, `InvalidConfig` —
+  `code().as_str()` gives `"invalid_program"` and so on), a JSON Pointer
+  `path()` into the program (for `InvalidConfig`, into the run
+  configuration), the node's `tag()`, a `cause()` (an executor's error, an
+  abort reason) and, for `InvalidProgram`, `UnknownFunction` and
+  `InvalidConfig`, every `issues()` found. An
   executor that returns a boxed `codyscript_core::Error` fails the run with
   exactly that error.
 - **Isolation** — `compile` copies the program, so later changes to the
@@ -317,6 +323,118 @@ assert_eq!(error.path(), "/x");
 assert_eq!(error.to_string(), r#"Variable "n" is not defined in "n * 2" at /x"#);
 ```
 
+## Debugging
+
+A host can run a program under a **debugger** — host code, usually with a
+person behind it — which pauses it at breakpoints, shows its variables, and
+steps on. It's all in the [`debug`] module.
+
+- **A step is a node**: an instruction (`set`, `ret`, `if`, `for`), or an
+  input (a literal, `val`, `ref`, `x`, `call`, or a `do` block) — the nodes
+  a run counts as steps. (Operands inside an expression count as steps
+  too, but run as part of their `x`: a run never pauses between them.) A
+  step is named by its path, as in errors (`/do/1`, `/fn/fee/do/0/set/fee`),
+  and `compiled.steps()` lists every one in the order written, with its kind,
+  what it names (a variable, a function), its tag, the function it's in, and
+  how deeply it's nested.
+- **Breakpoints** name the steps to pause before: `Breakpoint::tag("cap")`
+  names every step tagged `cap`; `Breakpoint::path("/do/1")` the step at
+  that path. Prefer tags where steps have them — an editor's node ids are
+  ideal: a path changes when the program around its step is edited
+  (insert an instruction before `/do/1`, and it's `/do/2`), but a tag
+  moves with its node. `step.breakpoint()` makes the best one for a step.
+  **A breakpoint that names no step is an error**: `invalid_config`, listing
+  every one that doesn't, by its place in the list (`/breakpoints/0`).
+- **A run configuration** (`RunConfig`) is how a program is to be run,
+  kept apart from the program, which behaves the same whatever it says:
+  its `variables`, and its `breakpoints`. As data — in JSON, what an IDE
+  keeps beside a program, with a [schema] in `codyscript-json`:
+
+  ```json
+  { "variables": { "Amount": 20000 },
+    "breakpoints": [{ "tag": "cap" }, { "path": "/do/1" }] }
+  ```
+
+  Either field may be left out; any other is refused. It holds no limits:
+  those are the host's, for where it runs. `compiled.check(&config)` checks
+  its breakpoints against the program, without running it.
+- **`compiled.debug(options, breakpoints, debugger)`** runs the program,
+  pausing before each step a breakpoint names, and then wherever the
+  debugger's actions take it — nowhere else: not at the start, not at the
+  end, and with no breakpoints, never. (Its options and breakpoints usually
+  come from a `RunConfig`: `RunOptions::from(config.variables)`,
+  `config.breakpoints`.) It checks the breakpoints first. At each pause the
+  debugger gets a `Pause`: the step (`step()`, as `steps()` lists it) and
+  why it paused (`Breakpoint` or `Step`), the steps taken, the variables as
+  that step sees them (`scopes()`, `variable(name)`), the call stack
+  (`frames()`: each CodyScript function running, the `call` that's running
+  it, and its scopes), and the breakpoints, which it may change — checked
+  again as the run goes on. It answers with how to go on:
+
+| Action | Pauses next… |
+|---|---|
+| `StepInto` | at the very next step: this one's first part, or — for a call of a CodyScript function — the first step inside it, after the arguments |
+| `StepOver` | at the next step once this one is done, with all its parts and every function it calls; that can be in the caller, when it was a function's last. If it was the program's last, the run ends |
+| `Continue` | at the next breakpoint |
+| `Stop` | nowhere: the run fails with `aborted` (`Run stopped by the debugger`) at this step, which isn't taken |
+
+To step through a program from its start, put a breakpoint on its first
+step (`compiled.steps()[0].breakpoint()`). A breakpoint pauses the run wherever it's
+reached, even in the middle of a step over. A debugger answers with a
+future, so the run can wait as long as a person takes to click; it may keep
+the `Pause` while it waits. `debug::from_fn` makes a debugger from a closure
+that answers at once; for a user interface, implement `Debugger` and resolve
+the future from it (see `codyscript-wasm` for one in JavaScript). A `Pause`
+serializes as `{ reason, path, kind, name?, tag?, function?, depth, steps,
+frames, breakpoints }` — its step's fields, and the rest — ready to send
+one.
+
+Apart from its pauses, a debugged run is a run: it has the same result,
+steps, limits and errors, and can't change what the program does — a pause
+shows the variables but doesn't let anyone change them. A run that isn't
+debugged pays nothing for this: its loop is built without the checks. A
+debugged one asks its debugging session before every step: between
+pauses, it runs about 1.3–2× slower (see `codyscript-bench`).
+
+```rust
+use codyscript_core::debug::{self, Action, Breakpoint};
+use codyscript_core::{value, Engine, RunOptions};
+
+let program = Engine::new().compile(&value!({
+    "fn": { "fee": { "do": [
+        { "set": { "fee": { "x": "amount * 0.03" } } },
+        { "if": { "x": "fee > 300" }, "do": [{ "ret": 300 }], "tag": "cap" },
+        { "ret": { "ref": "fee" } }
+    ] } },
+    "do": [
+        { "set": { "fee": { "call": { "fee": { "amount": { "ref": "Amount" } } } } } },
+        { "ret": { "x": "Amount + fee" } }
+    ]
+})).unwrap();
+
+let mut seen = Vec::new();
+let debugger = debug::from_fn(|pause| {
+    // A pause lasts until the debugger answers: keep copies.
+    let function = pause.frames().last().and_then(|frame| frame.function);
+    let fee = pause.variable("fee").cloned();
+    seen.push((pause.step().path.to_owned(), function.map(str::to_owned), fee));
+    Action::StepOver
+});
+let options = RunOptions::from(value!({ "Amount": 20000 }).into_object().unwrap());
+// A breakpoint inside the function, before its `if`: by its tag, which
+// edits to the program won't move.
+let breakpoints = [Breakpoint::tag("cap")];
+let result = program.debug_blocking(options, breakpoints, debugger).unwrap();
+assert_eq!(result.value, 20300);
+assert_eq!(seen, [
+    // In `fee`, which has worked out 600…
+    ("/fn/fee/do/1".to_owned(), Some("fee".to_owned()), Some(value!(600))),
+    // …and after stepping over the `if` that returns 300 from it, back in
+    // the program's body. Stepping over that, the last step, ends the run.
+    ("/do/1".to_owned(), None, Some(value!(300))),
+]);
+```
+
 ## Safety model
 
 A program can only call the external functions it declares, and only those
@@ -342,7 +460,9 @@ Raising `max_depth` raises that proportionally: on WebAssembly's 1 MiB stack
 under 500 for debug builds and 1,500 for release.
 
 An executor that panics isn't caught: the panic propagates to whoever polls
-the run, as panics do.
+the run, as panics do. The same goes for a debugger, which is host code too.
+Debugging changes none of this: a debugged run has the same limits, and a
+`Pause` is a read-only view of the variables.
 
 ## Differences from the TypeScript package
 
@@ -355,6 +475,9 @@ except that an input-shape error lists `"call"` where 0.5 lists `"op"`.
 The other differences are in the host API and in what JavaScript can and
 Rust can't express:
 
+- Debugging (the [`debug`] module), run configurations and the
+  `invalid_config` error code are Rust-only: the TypeScript package has no
+  debugger.
 - Executors return `Result<Value, BoxError>` rather than returning or
   throwing; there's no `undefined` (return `Value::Null`). Register them,
   with their functions, on `Engine::builder()` rather than passing an object
@@ -454,3 +577,5 @@ No rules were stored in the 0.1 format, so 0.2 reads only the new one.
 [`Map`]: https://docs.rs/codyscript-core/latest/codyscript_core/struct.Map.html
 [`Number`]: https://docs.rs/codyscript-core/latest/codyscript_core/struct.Number.html
 [`value!`]: https://docs.rs/codyscript-core/latest/codyscript_core/macro.value.html
+[`debug`]: https://docs.rs/codyscript-core/latest/codyscript_core/debug/index.html
+[schema]: ../codyscript-json/run-config.schema.json

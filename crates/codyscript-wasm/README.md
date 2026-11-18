@@ -37,6 +37,50 @@ only when the arguments are wrong (variables or limits that aren't JSON, an
 executor that isn't an object of functions). Also exported: `version()` and `schema()`
 (the JSON Schema, as text).
 
+### Debugging
+
+`debug(program, config, executors, limits, onPause) → Promise<string>`
+runs a program as `run` does, but takes a run configuration — its
+variables, and its breakpoints, as JSON text (`""` for none) — and pauses
+it at the breakpoints, calling `onPause(pause)` each time and waiting for
+its answer, which it may give whenever it likes, from a promise:
+
+```js
+const config = '{ "variables": { "Name": " Ada " }, "breakpoints": [{ "tag": "name-required" }] }';
+const outcome = JSON.parse(await debug(programJson, config, executors, "", (pause) => {
+  // pause: { reason, path, kind, name?, tag?, function?, depth, steps, breakpoints,
+  //          frames: [{ function?, call?, scopes: [{…}, …] }, …] }
+  show(pause);                                  // your UI
+  return new Promise((resolve) => (onClick = resolve));   // "stepOver", …
+}));
+```
+
+- A run configuration is `{ "variables"?: {…}, "breakpoints"?: [{ "tag":
+  … } or { "path": … }, …] }` (its JSON Schema: `runConfigSchema()`). A
+  breakpoint names the steps with a tag, or the step at a path; prefer tags,
+  which edits to the program don't move. One that names no step makes the
+  outcome an `invalid_config` error, listing each; `check(program, config,
+  executors, limits)` says the same without running: `{"ok":true}` or
+  `{"ok":false,"error":{…}}`. Text that isn't a run configuration rejects.
+- It pauses only at breakpoints (`reason` `"breakpoint"`), and then where
+  the actions it's given take it (`"step"`); with no breakpoints, never.
+  `path` is the step's JSON Pointer, `kind` its node type
+  (`"set"`, `"call"`, …), `frames` the call stack — the program's body
+  first, then each CodyScript function running, each with its scopes,
+  outermost first.
+- `onPause` returns, or resolves to, `"stepOver"`, `"stepInto"`,
+  `"continue"` or `"stop"` — or `{ action, breakpoints }` to replace the
+  breakpoints as well (checked the same way). `"stop"` ends the run with an
+  `aborted` error.
+- It resolves as `run` does, and rejects as `run` does or if `onPause`
+  throws, rejects or answers anything else.
+
+`steps(program, executors, limits) → string` lists the steps breakpoints can
+name, compiling the program as `run` would: `{"ok":true,"steps":[{ path,
+kind, name?, tag?, function?, depth }, …]}` in the order written (the body's,
+then each function's), or `{"ok":false,"error":{…}}`. See the core's
+README, "Debugging", for what each action does.
+
 ## Building
 
 ```bash
@@ -66,7 +110,8 @@ dependencies never become this one's.
 `tests/web.rs` runs CodyScript, compiled to WebAssembly, in a JavaScript
 engine — through these bindings (JavaScript functions, sync, async and
 throwing, and calls between them and CodyScript functions; the event loop
-driving a run; JSON in and out) and through the core
+driving a run; JSON in and out; debugging with a JavaScript `onPause`) and
+through the core
 directly (the blocking runner, signals), plus stack-depth checks under
 WebAssembly's 1 MiB stack.
 

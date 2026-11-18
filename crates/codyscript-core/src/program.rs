@@ -13,8 +13,16 @@ use crate::value::Value;
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
     pub body: Input,
-    /// Every function's body, in the order written; calls hold an index.
-    pub functions: Vec<Input>,
+    /// Every function, in the order written; calls hold an index.
+    pub functions: Vec<Function>,
+}
+
+/// One of the program's own functions (`fn`).
+#[derive(Clone, Debug)]
+pub(crate) struct Function {
+    /// Its name, for the debugger's call stack.
+    pub name: String,
+    pub body: Input,
 }
 
 /// Something that produces a value.
@@ -51,15 +59,28 @@ pub(crate) struct Expression {
 
 #[derive(Clone, Debug)]
 pub(crate) struct External {
-    /// The executor id: the function's name up to its first dot.
-    pub exe: String,
-    /// The function's name within its executor: what follows the first dot
-    /// (`trim` in `text.trim`).
-    pub op: String,
+    /// The function's full name, as called: `text.trim`.
+    pub name: String,
+    /// Where its first dot is: its executor's id comes before, its name
+    /// within the executor after.
+    pub dot: usize,
     /// The arguments to resolve, in order.
     pub args: Vec<(String, Input)>,
     /// The static `arg`, passed as written.
     pub arg: Option<Value>,
+}
+
+impl External {
+    /// The executor id: the name up to its first dot (`text`).
+    pub fn exe(&self) -> &str {
+        &self.name[..self.dot]
+    }
+
+    /// The function's name within its executor: what follows the first dot
+    /// (`trim` in `text.trim`).
+    pub fn op(&self) -> &str {
+        &self.name[self.dot + 1..]
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -1,6 +1,7 @@
 // Checks a built package (build.sh's output; its directory is the argument)
 // the way a Node user would load it: initialised from the module's bytes,
-// then a run calling a sync and an async JavaScript function, and a failing run.
+// then a run calling a sync and an async JavaScript function, a failing run,
+// and a debugged one.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -8,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 const dir = resolve(process.argv[2] ?? "target/npm");
 const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
-const { default: init, run, version, schema } = await import(pathToFileURL(join(dir, pkg.exports["."].default)));
+const { default: init, run, debug, steps, check, version, schema, runConfigSchema } = await import(pathToFileURL(join(dir, pkg.exports["."].default)));
 await init({ module_or_path: await readFile(join(dir, "codyscript_wasm_bg.wasm")) });
 
 assert.equal(version(), pkg.version);
@@ -42,5 +43,18 @@ assert.deepEqual(empty.value, { error: "Name is required" });
 
 const failed = JSON.parse(await run("{", "", null, ""));
 assert.equal(failed.ok, false);
+
+const listed = JSON.parse(steps(program, executors, ""));
+assert.equal(listed.steps[3].tag, "name-required");
+const config = JSON.stringify({ variables: { Name: "  Ada " }, breakpoints: [{ tag: "name-required" }] });
+assert.equal(check(program, config, executors, ""), '{"ok":true}');
+const pauses = [];
+const debugged = JSON.parse(await debug(program, config, executors, "", async (pause) => {
+	pauses.push(`${pause.path} (${pause.reason})`);
+	return "stepOver";
+}));
+assert.equal(debugged.value, "Ada");
+assert.deepEqual(pauses, ["/do/1 (breakpoint)", "/do/2 (step)"]);
+assert.equal(JSON.parse(runConfigSchema()).title, "CodyScript run configuration");
 
 console.log(`${pkg.name}@${pkg.version}: ok`);

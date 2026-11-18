@@ -47,6 +47,7 @@ cargo bench -p codyscript-bench --bench speed -- --baseline before
 | `run/call_loop/1000` | 1,000 calls to a synchronous executor: the cost of a call. |
 | `run/function_loop/1000` | 1,000 calls to a CodyScript function (`fn`): the cost of a call with a fresh scope. |
 | `run/lookup/{4,64,1024}` | 1,000 variable reads from a scope of that many variables. |
+| `debug/sum_loop/1000` | `run/sum_loop/1000` under a debugger, with a breakpoint to check at every step that pauses it only at the very end: what debugging costs a run between pauses. |
 | `json/parse`, `json/end_to_end` | Parsing the README rule; parse, compile, run and print it, as a JSON host does per row. |
 | `tokio/executor/…` | One run making 100 executor calls: `blocking` (`run_blocking`), on Tokio's `current_thread` or `multi_thread` runtime, or on the JavaScript `event_loop` (WebAssembly) — with `sync` executors, `async_ready` ones (async, but never waiting) and `yielding` ones (suspending once per call, as I/O would; the same code on both runtimes). |
 | `tokio/concurrency/…` | 64 such runs of one compiled program: `sequential`, or spawned on `current_thread` / `multi_thread`, or interleaved on the `event_loop` (WebAssembly). |
@@ -80,8 +81,18 @@ From the machine this was written on: 4 vCPUs (Intel Xeon, 2.6 GHz), Rust
 | `run/sum_loop/1000` | 1.1 ms (12 M steps/s) | 1.6 ms | 1.4× |
 | `run/call_loop/1000` | 1.0 ms (1 M calls/s) | 1.7 ms | 1.6× |
 | `run/function_loop/1000` | 0.61 ms (1.6 M calls/s) | 0.84 ms | 1.4× |
+| `debug/sum_loop/1000` | 1.1–1.6 ms | 2.0 ms | 1.3–1.8× |
 | `json/parse` | 5.2 µs (41 MiB/s) | 5.2 µs | 1.0× |
 | `json/end_to_end` | 17 µs | 24 µs | 1.5× |
+
+`debug/sum_loop` was measured in a later session, beside `run/sum_loop/1000`
+at 0.8–1.3 ms natively and 0.95 ms in WebAssembly: between pauses, a
+debugged run is 1.3–1.5× slower natively (24% more instructions, counted
+with Valgrind, whose counts don't vary as timings do here) and 2× in
+WebAssembly. The debugger's code favors clarity over speed — the run asks
+its debugging session before every step — since a debugged run spends its
+time paused anyway. Runs that aren't debugged don't pay for it: their
+instruction counts didn't change when it was added.
 
 `run/function_loop` was measured in a later session, in which
 `run/call_loop` took 0.54 ms natively and 0.91 ms in WebAssembly: a call of a

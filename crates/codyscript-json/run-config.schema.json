@@ -1,0 +1,55 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://github.com/cody-script/core/run-config.schema.json",
+	"title": "CodyScript run configuration",
+	"description": "How to run a program, kept apart from the program, which behaves the same whatever they are: its variables, and where a debugger pauses it. Either field may be left out. Limits aren't part of it: they're the host's. The engine also checks that every breakpoint names a step of the program (invalid_config).",
+	"type": "object",
+	"properties": {
+		"variables": {
+			"description": "The run's initial variables, by name, visible to the whole program.",
+			"type": "object"
+		},
+		"breakpoints": {
+			"description": "Where a debugger pauses the run: before each step a breakpoint names. Each must name at least one step.",
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/breakpoint"
+			}
+		}
+	},
+	"additionalProperties": false,
+	"$defs": {
+		"breakpoint": {
+			"description": "A step to pause before, by its tag or by its path. Prefer the tag where the step has one: a path changes when the program around the step is edited, but a tag moves with its node.",
+			"oneOf": [
+				{
+					"type": "object",
+					"properties": {
+						"tag": {
+							"description": "Every step whose \"tag\" is this.",
+							"type": "string"
+						}
+					},
+					"required": [
+						"tag"
+					],
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"properties": {
+						"path": {
+							"description": "The step at this JSON Pointer into the program, as errors use: \"/do/1\", \"/fn/fee/do/0/set/fee\", or \"\" for the program's root.",
+							"type": "string",
+							"pattern": "^(/([^~/]|~[01])*)*$"
+						}
+					},
+					"required": [
+						"path"
+					],
+					"additionalProperties": false
+				}
+			]
+		}
+	}
+}
