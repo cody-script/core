@@ -148,7 +148,7 @@ fn vars(value: Value) -> Variables {
 }
 
 /// Run options with these variables.
-pub fn options(variables: Variables) -> RunOptions {
+pub fn options<'d>(variables: Variables) -> RunOptions<'d> {
     RunOptions::from(variables)
 }
 

@@ -105,7 +105,7 @@ fn pauses_steps_and_actions_are_written_as_json() {
         }
     });
     program
-        .debug_blocking(RunOptions::new(), [Breakpoint::path("/do/0")], debugger)
+        .run_blocking(RunOptions::new().with_debugger([Breakpoint::path("/do/0")], debugger))
         .unwrap();
     assert_eq!(
         pauses,

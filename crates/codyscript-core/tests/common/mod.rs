@@ -117,7 +117,7 @@ pub fn vars(v: Value) -> Map {
 }
 
 #[track_caller]
-pub fn with_vars(v: Value) -> RunOptions {
+pub fn with_vars<'d>(v: Value) -> RunOptions<'d> {
     RunOptions::from(vars(v))
 }
 

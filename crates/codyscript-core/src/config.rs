@@ -19,9 +19,9 @@ use crate::engine::Variables;
 ///
 /// Limits aren't part of it: they're the host's, for where it runs.
 /// [`CompiledProgram::check`](crate::CompiledProgram::check) checks one
-/// against its program, as
-/// [`CompiledProgram::debug`](crate::CompiledProgram::debug) does before it
-/// starts.
+/// against its program, as a run with a debugger
+/// ([`RunOptions::with_debugger`](crate::RunOptions::with_debugger)) does
+/// before it starts.
 ///
 /// ```
 /// use codyscript_core::debug::{self, Action, Breakpoint};
@@ -42,8 +42,8 @@ use crate::engine::Variables;
 ///     paused.push(pause.step().path.to_owned());
 ///     Action::Continue
 /// });
-/// let options = RunOptions::from(config.variables);
-/// let result = program.debug_blocking(options, config.breakpoints, debugger).unwrap();
+/// let options = RunOptions::from(config.variables).with_debugger(config.breakpoints, debugger);
+/// let result = program.run_blocking(options).unwrap();
 /// assert_eq!(result.value, 6);
 /// assert_eq!(paused, ["/do/0"]);
 /// ```

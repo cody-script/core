@@ -41,7 +41,9 @@ crates/
       value/         # The data model: Value, Number, Map, value! macro,
                      #   and its serde impls (serde_impls.rs) — the only
                      #   place the core meets data formats
-      engine.rs      # Engine, EngineBuilder, CompiledProgram (the public API)
+      engine.rs      # Engine, EngineBuilder, CompiledProgram, RunOptions
+                     #   (the public API; a debugger is a run option)
+      block_on.rs    # a std-only block_on, for the `_blocking` methods
       run.rs         # The interpreter: one loop over explicit stacks;
                      #   a function call is a frame on them, not recursion.
                      #   The loop is built twice (drive::<DEBUGGED>): only
@@ -75,7 +77,9 @@ crates/
                      #   README.md's doc tests
     schema.json      # JSON Schema for hand-writing programs
     run-config.schema.json  # JSON Schema for run configurations (IDEs)
-    tests/           # json.rs (conventions), schema.rs, readme.rs
+    tests/           # json.rs (conventions), schema.rs, readme.rs;
+                     #   scratch.rs: paste a program, debug the core
+                     #   natively (RustRover), or trace a run (TRACE)
   codyscript-wasm/   # WebAssembly bindings (wasm-bindgen); not published.
     src/lib.rs       # compile(program, executors, limits) → Program, and
                      #   run(program, variables, executors, limits), for
@@ -153,9 +157,11 @@ closures already work with `async_executor`.
   `tests/engine.rs` runs the deepest default-limit programs on a 1 MiB
   stack (WebAssembly's), and `codyscript-wasm` checks it under wasm32.
   Listing a program's steps (`debug::steps`) walks an explicit stack too.
-- **Debugging costs plain runs nothing.** `drive` is generic over
-  `DEBUGGED`, so the loop of a run that isn't debugged is compiled without
-  the pause; keep anything a pause holds across an `.await` inside
+- **Debugging costs plain runs nothing.** A debugger is a run option
+  (`RunOptions::with_debugger`), not a separate entry point: every run goes
+  through `run::run`, which picks the loop once, as it starts. `drive` is
+  generic over `DEBUGGED`, so the loop of a run that isn't debugged is
+  compiled without the pause; keep anything a pause holds across an `.await` inside
   `debug_task`, not `drive`, or every run pays to keep it. Pausing —
   whether, the `Pause`, the debugger, what its action means — is
   `Session::before`'s business (in `debug.rs`), not the loop's; the loop

@@ -204,8 +204,8 @@ pub async fn debug(
     };
     let outcome = match compile_program(&program, &executors, &limits)? {
         Ok(compiled) => {
-            let options = RunOptions::from(variables);
-            compiled.debug(options, breakpoints, &mut debugger).await
+            let options = RunOptions::from(variables).with_debugger(breakpoints, &mut debugger);
+            compiled.run(options).await
         }
         Err(error) => Err(error),
     };

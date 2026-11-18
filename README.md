@@ -43,8 +43,8 @@ it. The core never changes for a new format.
 
 ```toml
 [dependencies]
-codyscript-core = "0.7"
-codyscript-json = "0.7"   # if your programs are stored as JSON
+codyscript-core = "0.8"
+codyscript-json = "0.8"   # if your programs are stored as JSON
 ```
 
 The crates need Rust 1.99 or newer (edition 2024).
@@ -109,8 +109,8 @@ for row in rows_json {
 and that the host provides every function it declares, up front — so a
 broken rule fails when it's saved, not halfway through a file. In async code, `rule.run(options).await` instead.
 
-A host can also **debug** a rule: `rule.debug(options, breakpoints,
-debugger)` pauses it at breakpoints — any step can have one, named by its
+A host can also **debug** a rule — run it with a debugger,
+`rule.run(options.with_debugger(breakpoints, debugger))` — which pauses it at breakpoints — any step can have one, named by its
 tag or path — to show its variables and call stack, then steps over, into,
 on or stops as the debugger says. A rule's variables and breakpoints can be
 kept beside it, apart from the rule, as a *run configuration*: a JSON
