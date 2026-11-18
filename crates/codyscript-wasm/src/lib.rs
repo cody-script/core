@@ -31,8 +31,8 @@ use std::rc::Rc;
 
 use codyscript_core::debug::{Action, Breakpoint, Debugger, Pause, Step};
 use codyscript_core::{
-    BoxError, BoxFuture, CompiledProgram, Engine, Error, Executor, ExecutorCall, ExecutorResult,
-    Limits, RunConfig, RunOptions, RunResult, Value, Variables,
+    BoxError, BoxFuture, CompiledProgram, Engine, Error, Executor, ExecutorCall, ExecutorFuture,
+    ExecutorResult, Limits, RunConfig, RunOptions, RunResult, Value, Variables,
 };
 use codyscript_json::EngineJsonExt;
 use js_sys::{Array, Function, JSON, Object, Promise};
@@ -434,13 +434,23 @@ async fn ask(on_pause: &Function, pause: &Pause<'_>) -> Result<Reply, BoxError> 
 struct JsExecutor(SendWrapper<HashMap<String, Function>>);
 
 impl Executor for JsExecutor {
-    fn call(&self, call: ExecutorCall) -> BoxFuture<'_, ExecutorResult> {
-        Box::pin(SendWrapper::new(async move {
-            // The engine only calls functions this executor was registered
-            // with: its object's keys.
-            let function = self.0.get(&call.op).ok_or("no such function")?;
-            call_js(function, call).await
-        }))
+    /// Calls the function at once: a value it returns is the result, and
+    /// only a promise is awaited.
+    fn call(&self, call: ExecutorCall) -> ExecutorFuture<'_> {
+        // The engine only calls functions this executor was registered
+        // with: its object's keys.
+        let Some(function) = self.0.get(call.op()) else {
+            return Err("no such function".into()).into();
+        };
+        match call_js(function, &call) {
+            Ok(result) => match result.dyn_into::<Promise>() {
+                Ok(promise) => ExecutorFuture::new(SendWrapper::new(async move {
+                    value_of(&JsFuture::from(promise).await.map_err(describe)?)
+                })),
+                Err(result) => value_of(&result).into(),
+            },
+            Err(error) => Err(error).into(),
+        }
     }
 }
 
@@ -453,20 +463,15 @@ struct Call<'a> {
     input: &'a Variables,
 }
 
-async fn call_js(function: &Function, call: ExecutorCall) -> ExecutorResult {
+/// Calls `function` with `call`: what it returns, maybe a promise.
+fn call_js(function: &Function, call: &ExecutorCall) -> Result<JsValue, BoxError> {
     let call = codyscript_json::to_string(&Call {
-        op: &call.op,
-        arg: call.arg.as_ref(),
+        op: call.op(),
+        arg: call.arg(),
         input: &call.input,
     })?;
     let argument = JSON::parse(&call).map_err(describe)?;
-    let mut result = function
-        .call1(&JsValue::NULL, &argument)
-        .map_err(describe)?;
-    if let Some(promise) = result.dyn_ref::<Promise>() {
-        result = JsFuture::from(promise.clone()).await.map_err(describe)?;
-    }
-    value_of(&result)
+    function.call1(&JsValue::NULL, &argument).map_err(describe)
 }
 
 /// A JavaScript value as a CodyScript value, through JSON: `undefined` (and

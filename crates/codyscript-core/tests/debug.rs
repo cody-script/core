@@ -30,7 +30,7 @@ fn seen(pause: &Pause<'_>) -> Seen {
     let mut variables = Map::new();
     for scope in pause.scopes() {
         for (name, value) in scope {
-            variables.insert(name.clone(), value.clone());
+            variables.insert(name, value.clone());
         }
     }
     Seen {

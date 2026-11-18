@@ -22,13 +22,15 @@
 //! isn't debugged doesn't pay for it. A debugged run does nothing at once:
 //! every step is a task of its own, so it can pause before any of them.
 
+use std::sync::Arc;
+
 use crate::debug::{Frame, Node, Session};
 use crate::engine::{Limits, RunOptions, RunResult, Variables};
 use crate::error::{Cause, Details, Error, ErrorCode};
 use crate::executor::{ExecutorCall, Signal};
-use crate::expression::{self, Fault, Stop};
+use crate::expression::{self, Ast, Fault, Stop};
 use crate::program::{
-    Call, Expression, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
+    Call, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
 };
 use crate::value::{Map, Value};
 
@@ -96,7 +98,7 @@ enum Task<'p> {
     /// variables.
     Invoke(&'p Call, &'p Input),
     /// Assign the value to this variable in the current scope.
-    Assign(&'p str),
+    Assign(&'p Arc<str>),
     /// End the current block with the value.
     Return,
     /// Run `then` if the value (`test`'s) is `true`, else `otherwise`.
@@ -225,12 +227,13 @@ impl<'p> Machine<'p, '_> {
             Task::Execute(ins) => self.execute::<DEBUGGED>(ins)?,
             Task::Assign(name) => {
                 let value = self.pop();
-                // Reassigning, the usual case in a loop, needs no new name.
+                // Reassigning, the usual case in a loop, needs no new name;
+                // a new variable shares the program's.
                 let scope = self.scope();
                 match scope.get_mut(name) {
                     Some(slot) => *slot = value,
                     None => {
-                        scope.insert(name.to_owned(), value);
+                        scope.insert(Arc::clone(name), value);
                     }
                 }
             }
@@ -289,7 +292,7 @@ impl<'p> Machine<'p, '_> {
                     ));
                 }
             },
-            InputKind::X(expression) => self.expression(expression, input.tag.as_deref())?,
+            InputKind::X(ast) => self.expression(ast, input)?,
             InputKind::External(external) => {
                 // Arguments resolve one at a time, in order: the first
                 // pushed last, so it runs first.
@@ -434,13 +437,12 @@ impl<'p> Machine<'p, '_> {
         {}
     }
 
-    /// The arguments on the value stack, by name, taken off it.
-    fn arguments(&mut self, args: &[(String, Input)]) -> Map {
+    /// The arguments on the value stack, by name, taken off it. (A call's
+    /// argument names are distinct: they're an object's keys.)
+    fn arguments(&mut self, args: &[(Arc<str>, Input)]) -> Map {
         let at = self.values.len().saturating_sub(args.len());
-        let mut map = Map::with_capacity(args.len());
-        let names = args.iter().map(|(name, _)| name.clone());
-        map.extend(names.zip(self.values.drain(at..)));
-        map
+        let names = args.iter().map(|(name, _)| Arc::clone(name));
+        Map::from_unique(names.zip(self.values.drain(at..)).collect())
     }
 
     /// Calls an external function — the host's — with the arguments on the
@@ -448,7 +450,7 @@ impl<'p> Machine<'p, '_> {
     async fn call_external(&mut self, external: &External, node: &Input) -> Result<Value, Error> {
         let tag = node.tag.as_deref();
         let call = ExecutorCall {
-            op: external.op().to_owned(),
+            op: Arc::clone(&external.op),
             arg: external.arg.clone(),
             input: self.arguments(&external.args),
             signal: self.meter.signal.clone(),
@@ -467,22 +469,25 @@ impl<'p> Machine<'p, '_> {
         })
     }
 
-    fn expression(&mut self, expression: &Expression, tag: Option<&str>) -> Result<Value, Error> {
+    /// Evaluates the expression of `input`, an `x` node. Its failures point
+    /// at the node's `/x`.
+    fn expression(&mut self, ast: &Ast, input: &Input) -> Result<Value, Error> {
         let mut cx = ExpressionContext {
             scopes: &self.scopes[self.base..],
             meter: &mut self.meter,
         };
-        expression::evaluate(&expression.ast, &mut cx).map_err(|fault| {
+        expression::evaluate(ast, &mut cx).map_err(|fault| {
+            let (path, tag) = (format!("{}/x", input.path), input.tag.as_deref());
             let (code, message) = match fault {
-                Fault::Stop(stop) => return self.meter.error(stop, &expression.path, tag),
+                Fault::Stop(stop) => return self.meter.error(stop, &path, tag),
                 Fault::Undefined(name) => (
                     ErrorCode::UndefinedVariable,
                     format!("Variable \"{name}\" is not defined"),
                 ),
                 Fault::Type(message) => (ErrorCode::TypeError, message),
             };
-            let message = format!("{message} in \"{}\"", expression.source);
-            failure(code, message, &expression.path, tag, None)
+            let message = format!("{message} in \"{}\"", ast.source);
+            failure(code, message, &path, tag, None)
         })
     }
 

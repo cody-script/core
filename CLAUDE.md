@@ -63,7 +63,9 @@ crates/
                      #   Program is its body and its `fn` functions; a call
                      #   is resolved to an External or a function index
       expression.rs  # The `x` language: tokenizer, parser, evaluator
-      executor.rs    # Executor trait, ExecutorCall, Signal, closure adapters
+      executor.rs    # Executor trait, ExecutorCall (op/arg shared with the
+                     #   tree), ExecutorFuture (no box for a sync result),
+                     #   Signal, closure adapters
                      #   (engine.rs registers each with its function names)
       error.rs       # Error, ErrorCode, Issue, Details
     tests/
@@ -222,7 +224,9 @@ closures already work with `async_executor`.
   carry `NaN`); `compile` refuses non-finite numbers in programs, number
   literals in expressions included. `Map` keeps insertion order — it
   decides argument order — and compares order-insensitively; reading one
-  with a repeated key is an error, in every format (`MapVisitor`).
+  with a repeated key is an error, in every format (`MapVisitor`). Its
+  keys are `Arc<str>`: the program's names (`set`, arguments) are shared
+  into scopes and calls, never copied — keep it that way on hot paths.
 - **Expressions stay small**: arithmetic, comparison, logic and `??`; no
   calls, assignment or loops. Strict types (`1 + 'a'` is a `type_error`),
   strict booleans (no truthiness: `if`/`for` tests, `!`, `&&`, `||` take

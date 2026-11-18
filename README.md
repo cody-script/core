@@ -43,8 +43,8 @@ it. The core never changes for a new format.
 
 ```toml
 [dependencies]
-codyscript-core = "0.9"
-codyscript-json = "0.9"   # if your programs are stored as JSON
+codyscript-core = "0.10"
+codyscript-json = "0.10"  # if your programs are stored as JSON
 ```
 
 The crates need Rust 1.99 or newer (edition 2024).
@@ -78,7 +78,7 @@ use codyscript_json::EngineJsonExt;
 
 fn text(call: ExecutorCall) -> ExecutorResult {
     let value = call.input.get("value").and_then(Value::as_str).unwrap_or("");
-    match call.op.as_str() {
+    match call.op() {
         "trim" => Ok(value.trim().into()),
         "empty" => Ok(value.is_empty().into()),
         op => Err(format!("text has no \"{op}\"").into()),

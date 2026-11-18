@@ -100,11 +100,7 @@ pub fn tagged(mut node: Value, tag: &str) -> Value {
 /// An object's keys, in order.
 #[track_caller]
 pub fn keys(v: &Value) -> Vec<&str> {
-    v.as_object()
-        .expect("an object")
-        .keys()
-        .map(String::as_str)
-        .collect()
+    v.as_object().expect("an object").keys().collect()
 }
 
 /// An object's entries, for variables.
@@ -133,7 +129,7 @@ pub const MATH: [&str; 4] = ["add", "lt", "eq", "round.half.up"];
 /// A tiny arithmetic/comparison executor: `call("math.add", { a, b })`.
 pub fn math(call: ExecutorCall) -> ExecutorResult {
     let (a, b) = (call.input.get("a"), call.input.get("b"));
-    match call.op.as_str() {
+    match call.op() {
         "add" => match (a.and_then(Value::as_i64), b.and_then(Value::as_i64)) {
             (Some(a), Some(b)) => Ok(value!(a + b)),
             _ => Ok(value!(number(a) + number(b))),

@@ -692,7 +692,9 @@ fn a_signal_aborts_a_run() {
     let signal = Signal::new();
     let engine = Engine::builder()
         .executor("stop", ["x"], |call| {
-            call.signal.expect("the run's signal").abort_with("enough");
+            call.signal()
+                .expect("the run's signal")
+                .abort_with("enough");
             Ok(value!(true))
         })
         .build();
@@ -710,7 +712,7 @@ fn maps_and_numbers_behave_the_same() {
     // Map's hash index (past eight keys) and float formatting, under wasm32.
     let map: codyscript_core::Map = (0..50).map(|i| (format!("k{i}"), i)).collect();
     assert_eq!(map.get("k42"), Some(&value!(42)));
-    assert_eq!(map.keys().next().map(String::as_str), Some("k0"));
+    assert_eq!(map.keys().next(), Some("k0"));
     let v: Value = codyscript_json::from_str("[0.1, 1e21, -0, 18446744073709551615]").unwrap();
     assert_eq!(to_json(&v), "[0.1,1e+21,-0.0,18446744073709551615]");
 }

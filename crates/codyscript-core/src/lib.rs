@@ -19,5 +19,5 @@ pub use engine::{
     CompiledProgram, Engine, EngineBuilder, Limits, RunOptions, RunResult, Variables,
 };
 pub use error::{BoxError, Cause, Details, Error, ErrorCode, Issue};
-pub use executor::{BoxFuture, Executor, ExecutorCall, ExecutorResult, Signal};
+pub use executor::{BoxFuture, Executor, ExecutorCall, ExecutorFuture, ExecutorResult, Signal};
 pub use value::{Map, Number, Value};

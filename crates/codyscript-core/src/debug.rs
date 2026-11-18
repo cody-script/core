@@ -21,6 +21,7 @@
 
 use std::fmt;
 use std::future::ready;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -540,7 +541,7 @@ impl<'p> Node<'p> {
         match self {
             Node::Input(input) => match &input.kind {
                 InputKind::Ref(name) => Some(name),
-                InputKind::X(expression) => Some(&expression.source),
+                InputKind::X(ast) => Some(&ast.source),
                 InputKind::External(external) => Some(&external.name),
                 InputKind::Call(call) => Some(&functions[call.function].name),
                 InputKind::Const(_) | InputKind::Do(_) => None,
@@ -618,7 +619,7 @@ fn push_all<'p>(stack: &mut Vec<(Node<'p>, usize)>, list: &'p [Instruction], dep
     stack.extend(list.iter().rev().map(|ins| (Node::Instruction(ins), depth)));
 }
 
-fn push_args<'p>(stack: &mut Vec<(Node<'p>, usize)>, args: &'p [(String, Input)], depth: usize) {
+fn push_args<'p>(stack: &mut Vec<(Node<'p>, usize)>, args: &'p [(Arc<str>, Input)], depth: usize) {
     stack.extend(args.iter().rev().map(|(_, arg)| (Node::Input(arg), depth)));
 }
 

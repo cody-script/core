@@ -224,7 +224,12 @@ side at the program's root:
 
 [`Value`] is an enum of `Null`, `Bool`, `Number`, `String`, `Array` and
 `Object`. [`Map`] (an object) keeps insertion order and looks keys up through
-a hash index once it outgrows a short scan; equality ignores order.
+a hash index once it outgrows a short scan; equality ignores order. Its keys
+are `Arc<str>`, so cloning a map, or reusing a name as a key, shares them
+rather than copying: a program's argument and variable names become keys at
+every call and every `set` without allocating. `insert` takes any
+`impl Into<Arc<str>>` (`&str`, `String`, `Arc<str>`); iterating yields
+`(&str, &Value)`, and an owned map yields `(Arc<str>, Value)`.
 [`Number`] holds an integer exactly or any `f64`, including `NaN` and the
 infinities that formats like YAML and CBOR can express — `compile` refuses
 them in programs.
@@ -256,13 +261,11 @@ Engine::builder()
 engine.has_function("text.trim") -> bool
 
 engine.compile(&program) -> Result<CompiledProgram, Error>
-engine.compile_owned(program) -> Result<CompiledProgram, Error>  // keeps it, no copy
 engine.run(&program, options).await -> Result<RunResult, Error>   // compile + run once
 engine.run_blocking(&program, options) -> Result<RunResult, Error>
 compiled.run(options).await / compiled.run_blocking(options)
 compiled.steps() -> Vec<debug::Step>                       // what breakpoints name
 compiled.check(&run_config) -> Result<(), Error>           // its breakpoints name steps?
-compiled.program() -> &Value
 
 RunOptions::new().with_variables(map).with_signal(signal)  // or RunOptions::from(map)
     .with_debugger(breakpoints, debugger)                   // to debug the run
@@ -273,11 +276,16 @@ RunResult { value: Value, variables: Map, steps: u64 }
   ones they provide: `.executor("text", ["trim", "empty"], f)` provides
   `text.trim` and `text.empty`, and `compile` checks every function a
   program declares in `ext` against that list. A call of one reaches the
-  executor as an `ExecutorCall { op, arg, input, signal }` — `op` is which
-  of its functions (`"trim"`) — and it returns
-  `Result<Value, BoxError>` (`Value::Null` for nothing), directly or from a
-  `Send` future. Registering an id again replaces its executor and its list. `BoxError` converts from any error and from strings, so `?`
-  and `Err("…".into())` work. Each engine owns its executors; there is no
+  executor as an `ExecutorCall`: `call.op()` is which of its functions
+  (`"trim"`), `call.arg()` the program's `arg`, `call.input` the resolved
+  arguments, `call.signal()` the run's signal. The function's name and
+  `arg` are shared with the compiled program, not copied for each call. It
+  returns `Result<Value, BoxError>` (`Value::Null` for nothing), directly
+  or from a `Send` future. A custom `Executor` returns an `ExecutorFuture`:
+  `ExecutorFuture::ready(result)` (or `result.into()`) answers at once with
+  no allocation, `ExecutorFuture::new(future)` boxes a future. Registering
+  an id again replaces its executor and its list. `BoxError` converts from
+  any error and from strings, so `?` and `Err("…".into())` work. Each engine owns its executors; there is no
   global registry. `Engine` is cheap to clone, and `Engine` and
   `CompiledProgram` are `Send + Sync`, so one compiled program can serve
   many runs at once.
@@ -304,9 +312,9 @@ RunResult { value: Value, variables: Map, steps: u64 }
   `InvalidConfig`, every `issues()` found. An
   executor that returns a boxed `codyscript_core::Error` fails the run with
   exactly that error.
-- **Isolation** — `compile` copies the program, so later changes to the
-  source value can't reach a compiled program. `compile_owned` takes the
-  program instead of copying it, for one that was just parsed or built.
+- **Isolation** — a compiled program keeps nothing of the value it was
+  compiled from: later changes to that value can't reach it, and the value
+  can be dropped as soon as `compile` returns.
 - **Compile once** — compiling is most of the cost of a short run (parsing
   and compiling a small rule takes several times as long as running it), so
   compile a program once and keep the `CompiledProgram` for every run.
@@ -493,6 +501,42 @@ Debugging changes none of this: a debugged run has the same limits, and a
 CodyScript began as a port of the TypeScript package `@cody-script/core`;
 since 0.9 it no longer follows it (see below), and earlier notes mention it
 for history only.
+
+### 0.9 → 0.10 (faster compiling and calls; API changes)
+
+The program format, behaviour, messages and error codes are unchanged.
+Compiling is 32–37% faster and allocates less than half as much; a
+compiled program takes 20–50% less memory. Runs that call executors are
+20–35% faster, CodyScript function calls about 12%, and loops of
+expressions 9–15%; reading a scope of more than 8 variables is about 5%
+slower. What changed in the API:
+
+- **`CompiledProgram::program()` is removed**: a compiled program no
+  longer keeps a copy of the program it was compiled from. Keep the
+  program yourself if you need it after compiling.
+- **`Engine::compile_owned(program)` is removed**: it existed only to skip
+  that copy. Use `engine.compile(&program)`, which no longer copies.
+- **`Map`'s keys are `Arc<str>`**, shared rather than copied: an executor
+  call's arguments and a run's new variables take their names from the
+  program without allocating, and cloning an object shares its keys.
+  `map.insert(key, value)` takes any `impl Into<Arc<str>>`, so write
+  `map.insert("a", v)` (not `"a".into()`, which no longer infers).
+  `keys()` and `iter()` yield `&str` rather than `&String`; an owned map
+  yields `(Arc<str>, Value)`; `FromIterator` and `Extend` take any key
+  that converts into an `Arc<str>`.
+- **`ExecutorCall`'s `op`, `arg` and `signal` are methods**, no longer
+  fields: `call.op()` (a `&str`: `match call.op() { "trim" => … }`),
+  `call.arg()` (`Option<&Value>`), `call.signal()`. The function's name
+  and `arg` are shared with the compiled program instead of copied for
+  each call. `call.input` is still a field. To test an executor, make a
+  call with `ExecutorCall::new(op, input)`, `.with_arg(…)` and
+  `.with_signal(…)`.
+- **A custom `Executor` returns an `ExecutorFuture`** rather than a
+  `BoxFuture`: `ExecutorFuture::ready(result)` (or `result.into()`) for a
+  result it has at once, which needs no allocation, or
+  `ExecutorFuture::new(future)` for one to await. Executors made with
+  `.executor(…)` and `.async_executor(…)` need no change.
+- `CompiledProgram`'s `Debug` shows its compiled tree.
 
 ### 0.8 → 0.9 (its own semantics, not JavaScript's)
 

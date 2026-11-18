@@ -13,6 +13,7 @@ mod serde_impls;
 use std::borrow::Cow;
 use std::fmt;
 use std::ops::{Index, IndexMut};
+use std::sync::Arc;
 
 pub use map::{IntoIter, Iter, Keys, Map, Values};
 pub use number::Number;
@@ -320,7 +321,7 @@ impl<T: Into<Value>> FromIterator<T> for Value {
     }
 }
 
-impl<K: Into<String>, V: Into<Value>> FromIterator<(K, V)> for Value {
+impl<K: Into<Arc<str>>, V: Into<Value>> FromIterator<(K, V)> for Value {
     /// An object.
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         Value::Object(iter.into_iter().collect())

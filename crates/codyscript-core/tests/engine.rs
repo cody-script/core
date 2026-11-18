@@ -3,7 +3,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use codyscript_core::{
-    Engine, Error, ErrorCode, Executor, ExecutorCall, Limits, RunOptions, Signal,
+    Engine, Error, ErrorCode, Executor, ExecutorCall, ExecutorFuture, Limits, RunOptions, Signal,
 };
 use codyscript_core::{Value, value};
 use common::*;
@@ -131,12 +131,10 @@ mod external_functions {
         assert_eq!(result.unwrap().value, value!("ok"));
         assert_eq!(
             *calls.lock().unwrap(),
-            vec![ExecutorCall {
-                op: "doIt".into(),
-                arg: Some(value!({ "cfg": true })),
-                input: vars(value!({ "a": 1, "b": "y" })),
-                signal: None,
-            }]
+            vec![
+                ExecutorCall::new("doIt", vars(value!({ "a": 1, "b": "y" })))
+                    .with_arg(value!({ "cfg": true }))
+            ]
         );
     }
 
@@ -146,12 +144,7 @@ mod external_functions {
         run(&engine, &uses_exe(call("exe.x", value!({})))).unwrap();
         assert_eq!(
             *calls.lock().unwrap(),
-            vec![ExecutorCall {
-                op: "x".into(),
-                arg: None,
-                input: Default::default(),
-                signal: None,
-            }]
+            vec![ExecutorCall::new("x", Default::default())]
         );
     }
 
@@ -163,13 +156,13 @@ mod external_functions {
             &uses_exe(call_with("exe.x", value!({}), Value::Null)),
         )
         .unwrap();
-        assert_eq!(calls.lock().unwrap()[0].arg, Some(Value::Null));
+        assert_eq!(calls.lock().unwrap()[0].arg(), Some(&Value::Null));
     }
 
     #[test]
     fn a_function_name_with_dots_splits_at_the_first() {
         let engine = Engine::builder()
-            .executor("num", ["round.up"], |call| Ok(call.op.into()))
+            .executor("num", ["round.up"], |call| Ok(call.op().into()))
             .build();
         let program = with_ext(
             call("num.round.up", value!({})),
@@ -209,7 +202,7 @@ mod external_functions {
             .async_executor("slow", ["x"], move |call| {
                 let log = Arc::clone(&slow_log);
                 async move {
-                    let arg = call.arg.unwrap_or_default();
+                    let arg = call.arg().cloned().unwrap_or_default();
                     sleep(if arg == "a" { 10 } else { 0 }).await;
                     log.lock()
                         .unwrap()
@@ -641,8 +634,8 @@ mod functions {
             .executor("log", ["x"], move |call| {
                 seen.lock()
                     .unwrap()
-                    .push(call.arg.clone().unwrap_or_default());
-                Ok(call.arg.unwrap_or_default())
+                    .push(call.arg().cloned().unwrap_or_default());
+                Ok(call.arg().cloned().unwrap_or_default())
             })
             .build();
         let logged = |v: Value| call_with("log.x", value!({}), v);
@@ -980,24 +973,6 @@ mod compile {
             compiled_value(&compiled, with_vars(value!({ "n": 10 }))),
             value!(11)
         );
-        assert_eq!(compiled.program(), &source);
-    }
-
-    #[test]
-    fn compile_owned_keeps_the_program_it_is_given() {
-        let source = m(vec![ret(x("n + 1"))]);
-        let engine = engine();
-        let compiled = engine.compile_owned(source.clone()).unwrap();
-        assert_eq!(compiled.program(), &source);
-        assert_eq!(
-            compiled_value(&compiled, with_vars(value!({ "n": 1 }))),
-            value!(2)
-        );
-        let invalid = with_ext(call("nope.x", value!({})), value!({ "nope": ["x"] }));
-        let owned = engine.compile_owned(invalid.clone()).unwrap_err();
-        let borrowed = compile_error(&engine, &invalid);
-        assert_eq!(owned.to_string(), borrowed.to_string());
-        assert_eq!(owned.issues(), borrowed.issues());
     }
 
     #[test]
@@ -1038,14 +1013,45 @@ mod compile {
     }
 
     #[test]
+    fn a_custom_executor_may_answer_at_once() {
+        struct Upper;
+        impl Executor for Upper {
+            fn call(&self, call: ExecutorCall) -> ExecutorFuture<'_> {
+                let text = call.input.get("s").and_then(Value::as_str).unwrap_or("");
+                Ok(text.to_uppercase().into()).into()
+            }
+        }
+        let engine = Engine::builder()
+            .custom_executor("text", ["upper"], Upper)
+            .build();
+        let program = with_ext(
+            call("text.upper", value!({ "s": "abc" })),
+            value!({ "text": ["upper"] }),
+        );
+        assert_eq!(run(&engine, &program).unwrap().value, value!("ABC"));
+    }
+
+    #[test]
+    fn a_call_can_be_made_to_test_an_executor() {
+        let signal = Signal::new();
+        let call = ExecutorCall::new("trim", vars(value!({ "value": " a " })))
+            .with_arg(value!({ "keep": 1 }))
+            .with_signal(signal.clone());
+        assert_eq!(call.op(), "trim");
+        assert_eq!(call.arg(), Some(&value!({ "keep": 1 })));
+        assert_eq!(call.signal(), Some(&signal));
+        assert_eq!(call.input["value"], value!(" a "));
+        let bare = ExecutorCall::new(String::from("x"), Default::default());
+        assert_eq!((bare.arg(), bare.signal()), (None, None));
+    }
+
+    #[test]
     fn a_custom_executor_may_borrow_its_own_state() {
         struct Counter(Mutex<i64>);
         impl Executor for Counter {
-            fn call(
-                &self,
-                _: ExecutorCall,
-            ) -> codyscript_core::BoxFuture<'_, codyscript_core::ExecutorResult> {
-                Box::pin(async move {
+            // Its future borrows `self`, as an async executor's may.
+            fn call(&self, _: ExecutorCall) -> ExecutorFuture<'_> {
+                ExecutorFuture::new(async move {
                     let mut n = self.0.lock().unwrap();
                     *n += 1;
                     Ok(value!(*n))
@@ -1139,7 +1145,7 @@ mod limits {
         let log = Arc::clone(&seen);
         let engine = Engine::builder()
             .executor("stop", ["x"], move |call| {
-                let signal = call.signal.expect("the run's signal");
+                let signal = call.signal().cloned().expect("the run's signal");
                 signal.abort_with("enough");
                 log.lock().unwrap().push(signal);
                 Ok(value!(true))

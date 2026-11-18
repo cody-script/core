@@ -9,12 +9,16 @@
 //! untrusted expression can't overflow the host's stack.
 
 use std::cmp::Ordering;
+use std::fmt;
+use std::sync::Arc;
 
 use crate::value::{Number, Value};
 
-/// A parsed expression.
+/// A parsed expression, with its source.
 #[derive(Clone, Debug)]
 pub(crate) struct Ast {
+    /// The expression as written.
+    pub source: Arc<str>,
     nodes: Vec<Node>,
     root: usize,
 }
@@ -25,8 +29,8 @@ enum Node {
     Lit(Value),
     /// A number literal.
     Num(f64),
-    /// A variable.
-    Name(String),
+    /// A variable. (Its own copy of the name: reading it is the hot path.)
+    Name(Box<str>),
     Unary(Unary, usize),
     Binary(Op, usize, usize),
 }
@@ -72,6 +76,12 @@ impl Op {
             Op::Mul => "*",
             Op::Div => "/",
         }
+    }
+}
+
+impl fmt::Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -258,19 +268,21 @@ impl<'s> Parser<'s> {
             Token::Sym(s) => Token::Sym(s),
         });
         self.i += 1;
+        let Some(token) = token else {
+            return Err("Expression ends too early".into());
+        };
         let ast = match token {
-            None => return Err("Expression ends too early".into()),
-            Some(Token::Num(n)) => self.push(Node::Num(n)),
-            Some(Token::Lit(v)) => self.push(Node::Lit(v)),
-            Some(Token::Sym("!")) => {
+            Token::Num(n) => self.push(Node::Num(n)),
+            Token::Lit(v) => self.push(Node::Lit(v)),
+            Token::Sym("!") => {
                 let a = self.unary()?;
                 self.push(Node::Unary(Unary::Not, a))
             }
-            Some(Token::Sym("-")) => {
+            Token::Sym("-") => {
                 let a = self.unary()?;
                 self.push(Node::Unary(Unary::Neg, a))
             }
-            Some(Token::Sym("(")) => {
+            Token::Sym("(") => {
                 let ast = self.level(0)?;
                 if self.peek() != Some(")") {
                     return Err("Missing \")\"".into());
@@ -278,10 +290,10 @@ impl<'s> Parser<'s> {
                 self.i += 1;
                 ast
             }
-            Some(Token::Sym(s)) if s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') => {
-                self.push(Node::Name(s.to_owned()))
+            Token::Sym(s) if s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') => {
+                self.push(Node::Name(s.into()))
             }
-            Some(Token::Sym(s)) => return Err(format!("Unexpected \"{s}\"")),
+            Token::Sym(s) => return Err(format!("Unexpected \"{s}\"")),
         };
         self.depth -= 1;
         Ok(ast)
@@ -305,6 +317,7 @@ pub(crate) fn parse(source: &str, max_depth: usize) -> Result<Ast, String> {
         return Err(format!("Unexpected \"{text}\""));
     }
     Ok(Ast {
+        source: source.into(),
         nodes: parser.nodes,
         root,
     })
@@ -446,7 +459,7 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
                 Node::Num(n) => values.push(V::Num(*n, None)),
                 Node::Name(name) => match cx.get(name) {
                     Some(v) => values.push(V::of(v)),
-                    None => return Err(Fault::Undefined(name.clone())),
+                    None => return Err(Fault::Undefined(name.to_string())),
                 },
                 Node::Unary(op, a) => {
                     tasks.push(Task::Unary(*op));
@@ -510,7 +523,7 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
 
 /// How many items a [`Stack`] holds before it needs the heap: enough for
 /// any ordinary expression.
-const INLINE: usize = 8;
+const INLINE: usize = 4;
 
 /// A stack for `evaluate` that keeps its first [`INLINE`] items in place,
 /// so evaluating an ordinary expression doesn't allocate; only a long chain
@@ -559,12 +572,11 @@ impl<T: Copy> Stack<T> {
 
 /// A comparison or arithmetic operator applied to two evaluated operands.
 fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
-    let sym = op.as_str();
     let pair = || format!("{} and {}", a.kind(), c.kind());
     match op {
         Op::Eq | Op::Ne => {
             if a.is_list() || c.is_list() {
-                return Err(format!("\"{sym}\" can't compare {}", pair()));
+                return Err(format!("\"{op}\" can't compare {}", pair()));
             }
             Ok(V::Bool(strict_eq(a, c) == (op == Op::Eq)))
         }
@@ -575,7 +587,7 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
                 (V::Str(x), V::Str(y)) => Some(x.cmp(y)),
                 _ => {
                     return Err(format!(
-                        "\"{sym}\" needs two numbers or two texts, got {}",
+                        "\"{op}\" needs two numbers or two texts, got {}",
                         pair()
                     ));
                 }
@@ -592,7 +604,7 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
         }
         Op::Add | Op::Sub | Op::Mul | Op::Div => {
             let (V::Num(x, _), V::Num(y, _)) = (a, c) else {
-                return Err(format!("\"{sym}\" needs numbers, got {}", pair()));
+                return Err(format!("\"{op}\" needs numbers, got {}", pair()));
             };
             let result = match op {
                 Op::Add => x + y,
@@ -604,7 +616,7 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
                 return Err("\"/\" divided by zero".into());
             }
             if !result.is_finite() {
-                return Err(format!("\"{sym}\" gave {}", non_finite(result)));
+                return Err(format!("\"{op}\" gave {}", non_finite(result)));
             }
             Ok(V::Num(result, None))
         }

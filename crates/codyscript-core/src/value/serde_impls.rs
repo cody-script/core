@@ -2,6 +2,7 @@
 //! meets serde, and so every serde data format.
 
 use std::fmt;
+use std::sync::Arc;
 
 use serde::de::{Deserialize, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, Serializer};
@@ -141,7 +142,7 @@ impl<'de> Visitor<'de> for MapVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Map, A::Error> {
         let mut map = Map::with_capacity(access.size_hint().unwrap_or(0).min(4096));
-        while let Some((key, value)) = access.next_entry::<String, Value>()? {
+        while let Some((Key(key), value)) = access.next_entry::<Key, Value>()? {
             if let Err((key, _)) = map.insert_new(key, value) {
                 return Err(A::Error::custom(format_args!("repeated key \"{key}\"")));
             }
@@ -153,6 +154,30 @@ impl<'de> Visitor<'de> for MapVisitor {
 impl<'de> Deserialize<'de> for Map {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_map(MapVisitor)
+    }
+}
+
+/// A map's key, made straight from the format's text: one allocation, as a
+/// `String` would be (serde's own `Arc<str>` goes through a `Box<str>`).
+struct Key(Arc<str>);
+
+impl<'de> Deserialize<'de> for Key {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeyVisitor;
+
+        impl Visitor<'_> for KeyVisitor {
+            type Value = Key;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string key")
+            }
+
+            fn visit_str<E>(self, key: &str) -> Result<Key, E> {
+                Ok(Key(key.into()))
+            }
+        }
+
+        deserializer.deserialize_str(KeyVisitor)
     }
 }
 
@@ -231,7 +256,7 @@ mod tests {
         let entries = vec![("z", 1u8), ("a", 2u8)].into_iter();
         let deserializer = MapDeserializer::<_, serde::de::value::Error>::new(entries);
         let v = Value::deserialize(deserializer).unwrap();
-        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["z", "a"]);
     }
 

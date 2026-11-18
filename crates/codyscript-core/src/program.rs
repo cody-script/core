@@ -42,7 +42,7 @@ pub(crate) enum InputKind {
     /// `ref`: a variable.
     Ref(String),
     /// `x`: an expression.
-    X(Expression),
+    X(Arc<Ast>),
     /// `call` of an external function: the host's executor runs it. Boxed,
     /// as the largest kind by far, so every other input stays small.
     External(Box<External>),
@@ -52,35 +52,19 @@ pub(crate) enum InputKind {
     Do(Vec<Instruction>),
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Expression {
-    pub source: Arc<str>,
-    pub ast: Arc<Ast>,
-    /// Where failures point: the node's `/x`.
-    pub path: String,
-}
-
 #[derive(Clone)]
 pub(crate) struct External {
     /// The executor, found when the program was compiled.
     pub executor: Arc<dyn Executor>,
     /// The function's full name, as called: `text.trim`.
     pub name: String,
-    /// Where its first dot is: its executor's id comes before, its name
-    /// within the executor (what the executor is called with) after.
-    pub dot: usize,
+    /// Its name within its executor, what follows the first dot (`trim`):
+    /// shared with every call.
+    pub op: Arc<str>,
     /// The arguments to resolve, in order.
-    pub args: Vec<(String, Input)>,
-    /// The static `arg`, passed as written.
-    pub arg: Option<Value>,
-}
-
-impl External {
-    /// The function's name within its executor: what follows the first dot
-    /// (`trim` in `text.trim`).
-    pub fn op(&self) -> &str {
-        &self.name[self.dot + 1..]
-    }
+    pub args: Vec<(Arc<str>, Input)>,
+    /// The static `arg`, passed as written: shared with every call.
+    pub arg: Option<Arc<Value>>,
 }
 
 impl fmt::Debug for External {
@@ -98,7 +82,7 @@ pub(crate) struct Call {
     /// The function's index in [`Program::functions`].
     pub function: usize,
     /// The arguments to resolve, in order: the function's variables.
-    pub args: Vec<(String, Input)>,
+    pub args: Vec<(Arc<str>, Input)>,
 }
 
 /// Something that does something.
@@ -112,7 +96,7 @@ pub(crate) struct Instruction {
 #[derive(Clone, Debug)]
 pub(crate) enum InstructionKind {
     Set {
-        name: String,
+        name: Arc<str>,
         to: Input,
     },
     Ret(Input),

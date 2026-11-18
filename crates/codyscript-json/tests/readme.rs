@@ -14,7 +14,7 @@ fn text(call: ExecutorCall) -> ExecutorResult {
         Some(Value::String(s)) => s.clone(),
         Some(other) => codyscript_json::to_string(other)?,
     };
-    match call.op.as_str() {
+    match call.op() {
         "trim" => Ok(value.trim().into()),
         "empty" => Ok(value.is_empty().into()),
         op => Err(format!("text has no \"{op}\"").into()),
