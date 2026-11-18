@@ -13,7 +13,7 @@ use crate::value::{Map, Value};
 /// A boxed, `Send` future, as executors return.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// What an executor produces: a JSON value (`Value::Null` for nothing), or an
+/// What an executor produces: a value (`Value::Null` for nothing), or an
 /// error that fails the run with `function_failed`.
 pub type ExecutorResult = Result<Value, BoxError>;
 
@@ -134,8 +134,8 @@ impl<F> fmt::Debug for AsyncFnExecutor<F> {
     }
 }
 
-/// Cancels a run: the counterpart of JavaScript's `AbortController` and
-/// `AbortSignal` in one cloneable handle.
+/// Cancels a run: one cloneable handle that both aborts and is checked (like
+/// an `AbortController` and its `AbortSignal` together).
 ///
 /// Give a clone to [`RunOptions::with_signal`](crate::RunOptions::with_signal)
 /// and keep one; [`abort`](Signal::abort) from anywhere (another thread, an

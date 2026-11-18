@@ -236,7 +236,7 @@ async fn compile_errors_limits_and_expressions() {
     let divide = run(r#"{ "x": "1 / z" }"#, r#"{"z":0}"#, JsValue::NULL, "").await;
     assert_eq!(
         divide["error"]["message"],
-        r#""/" gave Infinity (division by zero?) in "1 / z" at /x"#
+        r#""/" divided by zero in "1 / z" at /x"#
     );
 }
 

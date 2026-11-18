@@ -354,7 +354,7 @@ mod instructions {
     }
 
     #[test]
-    fn truthiness_is_javascripts() {
+    fn truthiness() {
         let engine = engine();
         let falsy = [
             value!(false),

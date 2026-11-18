@@ -73,10 +73,6 @@ fn messages_say_what_is_wrong() {
             "Invalid program: Expected a list of instructions at /do/0/do",
         ),
         (
-            value!({ "val": { "constructor": 1 } }),
-            r#"Invalid program: "constructor" is a reserved key at /val/constructor"#,
-        ),
-        (
             value!({ "ref": 1 }),
             "Invalid program: Expected a non-empty string at /ref",
         ),
@@ -195,14 +191,7 @@ fn external_function_names_are_looked_up_exactly() {
     ] {
         let program = with_ext(m(vec![]), obj([(exe, value!([op]))]));
         let error = compile_error(&engine, &program);
-        // A reserved executor name is an invalid program before it's unknown.
-        assert!(
-            matches!(
-                error.code(),
-                ErrorCode::UnknownFunction | ErrorCode::InvalidProgram
-            ),
-            "{exe}.{op}"
-        );
+        assert_eq!(error.code(), ErrorCode::UnknownFunction, "{exe}.{op}");
         assert!(!engine.has_function(&format!("{exe}.{op}")), "{exe}.{op}");
     }
     for name in MATH {
@@ -419,11 +408,12 @@ fn the_same_bad_expression_is_reported_wherever_it_is() {
 
 #[test]
 fn a_call_of_an_unknown_function_still_checks_its_arguments_and_arg() {
-    let program = value!({ "call": { "nope": { "a": [1] } }, "arg": { "prototype": 1 } });
+    let mut program = value!({ "call": { "nope": { "a": [1] } } });
+    program["arg"] = obj([("n", Value::from(f64::NAN))]);
     let error = compile_error(&engine(), &program);
     assert_eq!(
         issue_paths(&error),
-        ["/call/nope", "/call/nope/a", "/arg/prototype"]
+        ["/call/nope", "/call/nope/a", "/arg/n"]
     );
 }
 

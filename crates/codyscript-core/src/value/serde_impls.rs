@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::de::{Deserialize, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
 use super::{Map, Number, Value};
@@ -127,7 +127,9 @@ impl<'de> Deserialize<'de> for Value {
     }
 }
 
-/// Builds a [`Map`], entries in the order the format gives them.
+/// Builds a [`Map`], entries in the order the format gives them. A key may
+/// appear only once: a repeated one is an error, in any format, rather than
+/// a silent choice between its values.
 struct MapVisitor;
 
 impl<'de> Visitor<'de> for MapVisitor {
@@ -140,7 +142,9 @@ impl<'de> Visitor<'de> for MapVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Map, A::Error> {
         let mut map = Map::with_capacity(access.size_hint().unwrap_or(0).min(4096));
         while let Some((key, value)) = access.next_entry::<String, Value>()? {
-            map.insert(key, value);
+            if let Err((key, _)) = map.insert_new(key, value) {
+                return Err(A::Error::custom(format_args!("repeated key \"{key}\"")));
+            }
         }
         Ok(map)
     }

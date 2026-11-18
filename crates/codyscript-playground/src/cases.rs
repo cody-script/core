@@ -167,7 +167,7 @@ fn cases() -> Vec<Case> {
         } })),
         case("Division by zero", &value!({ "x": "1 / z" }))
             .variables(value!({ "z": 0 }))
-            .fails("type_error", r#""/" gave Infinity (division by zero?) in "1 / z" at /x"#),
+            .fails("type_error", r#""/" divided by zero in "1 / z" at /x"#),
         case("A throwing function", &value!({ "ext": { "fail": ["throw"] },
             "do": [{ "set": { "x": { "call": { "fail.throw": {} }, "arg": "boom", "tag": "n1" } } }] }))
             .fails("function_failed", r#"Function "fail.throw" failed: boom at /do/0/set/x (tag n1)"#),

@@ -8,12 +8,12 @@ conditions, loops, functions of its own, and calls to those and to the
 host's. Nothing else is reachable.
 
 It is meant for rules that live in data rather than code: a tenant's CSV
-mapping, a validation rule, a pipeline step. It's a port of the TypeScript
-package `@cody-script/core` 0.5; 0.6 changes the program format — every
-call is a call of a [function](crates/codyscript-core/README.md#functions),
-the host's or the program's own — which the TypeScript package doesn't have
-yet. It has no `unsafe` code and works with any async runtime, or none. MIT
-licensed.
+mapping, a validation rule, a pipeline step. It began as a port of the
+TypeScript package `@cody-script/core`, but has its own semantics, closer to
+Rust's than JavaScript's: every call is a call of a
+[function](crates/codyscript-core/README.md#functions), the host's or the
+program's own. It has no `unsafe` code and works with any async runtime, or
+none. MIT licensed.
 
 ## The crates
 
@@ -43,8 +43,8 @@ it. The core never changes for a new format.
 
 ```toml
 [dependencies]
-codyscript-core = "0.8"
-codyscript-json = "0.8"   # if your programs are stored as JSON
+codyscript-core = "0.9"
+codyscript-json = "0.9"   # if your programs are stored as JSON
 ```
 
 The crates need Rust 1.99 or newer (edition 2024).
@@ -144,8 +144,7 @@ they show.
 ## Documentation
 
 - [`codyscript-core`](crates/codyscript-core/README.md): the language
-  reference, semantics, host API, safety model and the differences from the
-  TypeScript package.
+  reference, semantics, host API, safety model and upgrade notes.
 - [`codyscript-json`](crates/codyscript-json/README.md): reading and writing
   JSON, and the JSON Schema for editors.
 

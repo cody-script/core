@@ -2,12 +2,13 @@
 
 The **CodyScript interpreter**, as a Cargo workspace: programs are data, the
 host supplies executors (which provide named external functions), and
-nothing else is reachable. A port of the TypeScript package
-`@cody-script/core` 0.5 (in `../corezip`) — but 0.6 changes the program
-format ahead of it: every call is a `call` of a function, declared in the
-root's `ext` (the host's) or defined in its `fn` (CodyScript's); `op` is
-gone; codes `unknown_function`, `function_failed`, `depth_limit`. Listed in
-the core README's differences and upgrade notes.
+nothing else is reachable. It began as a port of the TypeScript package
+`@cody-script/core` 0.5 (in `../corezip`), but no longer follows it (0.9):
+CodyScript has its own semantics, and prefers Rust's to JavaScript's —
+where something is done a certain way only because JavaScript does it, the
+Rust way (cleaner, faster) wins. Every call is a `call` of a function,
+declared in the root's `ext` (the host's) or defined in its `fn`
+(CodyScript's).
 README.md is the overview; each crate's README is its rustdoc front page
 (the core's is the language reference). This file is the working guide.
 
@@ -55,7 +56,7 @@ crates/
                      #   (CompiledProgram::steps); Session, which decides
                      #   before each step whether a run pauses, pauses it,
                      #   and says whether it goes on
-      validate.rs    # One walk: shape, finite numbers, depth, reserved keys,
+      validate.rs    # One walk: shape, finite numbers, depth,
                      #   root-only `fn`/`ext`, what each call names, the
                      #   host's functions, expression syntax; builds the tree
       program.rs     # The validated program tree (crate-private): a
@@ -68,7 +69,7 @@ crates/
     tests/
       common/mod.rs  # Builders, the `math` executor, valid/invalid fixtures
                      #   (shared with codyscript-json's tests via #[path])
-      engine.rs, validate.rs, expression.rs  # ports of the TypeScript tests
+      engine.rs, validate.rs, expression.rs  # begun as ports of the TypeScript tests
       debug.rs       # pausing, stepping, breakpoints, the step list
       data.rs        # format independence: serde tokens, CBOR end to end
   codyscript-json/   # The JSON adapter. Depends on core + serde_json.
@@ -204,10 +205,11 @@ closures already work with `async_executor`.
   line. Memory benchmarks borrow the scenario (`measure(&scenario)`):
   dropping it mustn't count as the work. Update the results in the bench
   README when numbers move materially, with the machine they came from.
-- **The program format is a contract** shared with the TypeScript package
-  and stored rules. Messages, paths and issue order match it exactly (a
-  differential fuzz against the TypeScript engine found no differences);
-  change them only together, with a version bump and an upgrade note.
+- **The program format is a contract** with stored rules. Behaviour,
+  messages, paths and issue order change only with a version bump and an
+  upgrade note in the core README. Its semantics are CodyScript's own, not
+  the TypeScript package's: don't add JavaScript behaviour for
+  compatibility's sake.
 - **Run configurations are a format too**, for IDEs: a program's
   `variables` and `breakpoints`, kept apart from it. `RunConfig`'s serde
   impls and `run-config.schema.json` accept and refuse the same documents
@@ -217,12 +219,14 @@ closures already work with `async_executor`.
   move it) or `path`, and one that names no step is an `invalid_config`
   error, whenever breakpoints are set — never silently ignored.
 - **Values are format-neutral.** `Number` holds any `f64` (formats like CBOR
-  carry `NaN`); `compile` refuses non-finite numbers in programs. `Map`
-  keeps insertion order — it decides argument order — and compares
-  order-insensitively.
+  carry `NaN`); `compile` refuses non-finite numbers in programs, number
+  literals in expressions included. `Map` keeps insertion order — it
+  decides argument order — and compares order-insensitively; reading one
+  with a repeated key is an error, in every format (`MapVisitor`).
 - **Expressions stay small**: arithmetic, comparison and logic; no calls,
   assignment or loops. Strict types (`1 + 'a'` is a `type_error`). Numbers
-  are f64 as in JavaScript; whole results become integers.
+  are f64; whole results become integers. Text compares by code point, as
+  Rust's `str` does.
 - **No global state.** Executors belong to an engine.
 - **Errors are `codyscript_core::Error`** with a code, a JSON Pointer path
   and the node's tag. Adding an `ErrorCode` is a public API change —
@@ -230,8 +234,5 @@ closures already work with `async_executor`.
 - The top-level README's first `json` block is executed by
   `codyscript-json/tests/readme.rs`; every README's `rust` blocks are doc
   tests. Keep them runnable.
-- Known differences from the TypeScript engine are listed in the core
-  README ("Differences from the TypeScript package"); keep that list
-  accurate.
 
 Keep this file accurate. An out-of-date CLAUDE.md is worse than none.

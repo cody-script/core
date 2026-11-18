@@ -7,9 +7,9 @@
 //! under WebAssembly's small stack. The loop's only `.await`s are an executor
 //! call and, in a debugged run, a pause.
 //!
-//! Every step is counted at the moment the recursive definition (the
-//! TypeScript engine) counts it, and in the same order: an instruction or
-//! input is a step when it starts, before its parts.
+//! Every step is counted at the moment a recursive interpreter would count
+//! it, and in the same order: an instruction or input is a step when it
+//! starts, before its parts.
 //!
 //! Work that would be pushed and popped straight away is done at once
 //! instead: a list runs its first instruction, and an instruction resolves
@@ -583,8 +583,8 @@ fn failure(
     )
 }
 
-/// JavaScript truthiness: `false`, `0`, `NaN`, `""` and `null` are false;
-/// everything else, including `[]` and `{}`, is true.
+/// Truthiness: `false`, `0`, `NaN`, `""` and `null` are false; everything
+/// else, including `[]` and `{}`, is true.
 fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,

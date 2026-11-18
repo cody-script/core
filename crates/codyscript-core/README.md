@@ -93,10 +93,10 @@ implement the same way, in a fraction of the bytes:
 
 | | |
 |---|---|
-| Values | numbers (`2`, `0.03`), text in single quotes (`'paid'`, `'it\'s'`), `true`, `false`, `null`, variable names (`gross_sales`) |
+| Values | numbers (`2`, `0.03`), text in single quotes (`'paid'`, `'it\'s'`; escapes `\n`, `\t`, `\\`, `\'`), `true`, `false`, `null`, variable names (`gross_sales`) |
 | Arithmetic | `+ - * /`, unary `-`, parentheses — numbers only |
 | Comparison | `== !=` (numbers, text, booleans, `null`; strict, so `1 == '1'` is false); `< <= > >=` (two numbers or two texts). One per level: `a < b < c` is refused — write `a < b && b < c` |
-| Logic | `&&` and `\|\|` short-circuit and return an operand, as in JavaScript (`discount \|\| 0`); `!` |
+| Logic | `&&` and `\|\|` short-circuit and return an operand (`discount \|\| 0`); `!` |
 
 Precedence, loosest first: `||`, `&&`, comparisons, `+ -`, `* /`, unary.
 Expressions don't call functions: for text, dates and everything else, use
@@ -188,15 +188,18 @@ side at the program's root:
 ### Semantics
 
 - **Values** are `null`, booleans, numbers, strings, lists and objects with
-  string keys. In a program, numbers must be finite and the keys
-  `__proto__`, `prototype` and `constructor` are refused (so programs stay
-  portable to the JavaScript engine).
+  string keys, each key appearing once (reading an object with a repeated
+  key is an error, in any format). In a program, numbers must be finite —
+  including a number literal in an expression, which can't be too large for
+  an `f64`.
 - **Numbers** keep the form they were given (an integer stays exact). In
-  expressions they are 64-bit floats, as in JavaScript; a result that is a
-  whole number within the range of an `i64` is an integer (`1 + 2` is `3`,
-  not `3.0`). Equality is numeric: `1 == 1.0`.
-- **Truthiness is JavaScript's**: `false`, `0`, `NaN`, `""` and `null` are
-  false; `[]` and `{}` are true.
+  expressions they are 64-bit floats (`f64`); a result that is a whole
+  number within the range of an `i64` is an integer (`1 + 2` is `3`, not
+  `3.0`). Equality is numeric: `1 == 1.0`.
+- **Text** compares by Unicode code point, as Rust's `str` does (`'Z' <
+  'a'`).
+- **Truthiness**: `false`, `0`, `NaN`, `""` and `null` are false; everything
+  else, including `[]` and `{}`, is true.
 - **Scope**: a nested block reads its enclosing variables, but `set` inside it
   assigns its own — nothing leaks out, and its `ret` returns only from it. A
   top-level block runs in the root scope, so its assignments are returned as
@@ -222,7 +225,8 @@ them in programs.
 - Read them with `as_str`, `as_f64`, `as_object`, `get`, and indexing
   (`v["a"][0]`, `null` when missing).
 - Convert with any serde format: `Value`, `Map` and `Number` implement
-  `Serialize` and `Deserialize`; so do `RunResult` (`{ value, variables,
+  `Serialize` and `Deserialize` (an object with a repeated key is refused);
+  so do `RunResult` (`{ value, variables,
   steps }`), `Limits` (`{ maxSteps, maxDepth }`), `RunConfig` (`{
   variables, breakpoints }`, see [Debugging](#debugging)), `ErrorCode` and
   `Issue`, and `Error` serializes as `{ code, message, path, tag?, issues?
@@ -474,45 +478,36 @@ the run, as panics do. The same goes for a debugger, which is host code too.
 Debugging changes none of this: a debugged run has the same limits, and a
 `Pause` is a read-only view of the variables.
 
-## Differences from the TypeScript package
-
-This crate's 0.6 is ahead of the TypeScript package's 0.5: **its program
-format ([functions](#functions): `fn`, `ext` and `call` in place of `op`)
-and error codes (`unknown_function`, `function_failed`, `depth_limit`) are
-Rust-only** until the TypeScript package adopts them. A program that calls
-no functions runs the same in both, with the same messages and paths —
-except that an input-shape error lists `"call"` where 0.5 lists `"op"`.
-The other differences are in the host API and in what JavaScript can and
-Rust can't express:
-
-- Debugging (the [`debug`] module), run configurations and the
-  `invalid_config` error code are Rust-only: the TypeScript package has no
-  debugger.
-- Executors return `Result<Value, BoxError>` rather than returning or
-  throwing; there's no `undefined` (return `Value::Null`). Register them,
-  with their functions, on `Engine::builder()` rather than passing an object
-  or `Map`.
-- `Signal` replaces `AbortSignal`: one cloneable handle that is both
-  controller and signal. Its reason is any error (or string).
-- `compile` takes a `Value`, so the checks for values no data format can
-  express (functions, dates, `undefined`) can't arise; non-finite numbers
-  still can, and are refused as in JavaScript.
-- Object keys keep their document order. (JavaScript objects list
-  integer-like keys such as `"1"` first; here they aren't reordered, so with
-  several problems in such an object the issues can be listed in a
-  different order.)
-- A very long expression chain (`1 + 1 + …` with tens of thousands of
-  terms) is evaluated without recursion, so it runs, or stops at
-  `step_limit`. JavaScript throws a `RangeError` (stack overflow), which
-  isn't a `CodyScriptError`.
-- `Unexpected "<character>"` names the whole character. For characters
-  outside the Basic Multilingual Plane (emoji), JavaScript names half of a
-  UTF-16 surrogate pair.
-
 ## Upgrading
 
-The program format is shared with the TypeScript package, so its history
-applies.
+CodyScript began as a port of the TypeScript package `@cody-script/core`;
+since 0.9 it no longer follows it (see below), and earlier notes mention it
+for history only.
+
+### 0.8 → 0.9 (its own semantics, not JavaScript's)
+
+CodyScript no longer matches the TypeScript package's behaviour and
+messages: where those followed JavaScript, it now has rules of its own,
+closer to Rust's. The program format, the Rust API and the error codes are
+unchanged. What changed:
+
+| | 0.8 | 0.9 |
+|---|---|---|
+| Keys `__proto__`, `prototype`, `constructor` | refused in programs | allowed, like any key |
+| An object with a repeated key | kept its first place and last value | an error, in every format (`repeated key "a"`); in JSON programs, an `invalid_program` |
+| Escapes in `'text'` | `\x` meant `x` (`'a\nb'` was `"anb"`) | `\n` line break, `\t` tab, `\\`, `\'`; any other is an `invalid_program` |
+| Text order (`< <= > >=`) | UTF-16 code units | Unicode code points |
+| Whitespace in expressions | JavaScript's `\s` | Unicode white space (`char::is_whitespace`) |
+| A number literal too large for an `f64` | `Infinity` | an `invalid_program`: `Number "…" is too large` |
+| Dividing by zero | `"/" gave Infinity (division by zero?)` | `"/" divided by zero` (still a `type_error`) |
+| Overflow (`big * 10`) | `"*" gave Infinity (division by zero?)` | `"*" gave Infinity` |
+| An unexpected token | `Unexpected 2`, `Unexpected "a"` (as `JSON.stringify` writes it) | as written: `Unexpected "2"`, `Unexpected "'a'"` |
+| Unterminated text | `Unexpected "'"` | `Text has no closing "'"` |
+
+A stored rule is affected only if it uses one of these: a `\n` or `\t` in
+text (whose meaning changes), another escape such as `\q` (now refused),
+text comparisons involving characters from U+E000 to U+FFFF and ones above
+U+FFFF, or an overflowing literal. Truthiness and `&&`/`||` are unchanged.
 
 ### 0.7 → 0.8 (one way to run; API only)
 
