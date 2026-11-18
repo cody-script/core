@@ -9,6 +9,7 @@
 //! untrusted expression can't overflow the host's stack.
 
 use std::cmp::Ordering;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::value::{Number, Value};
@@ -75,6 +76,12 @@ impl Op {
             Op::Mul => "*",
             Op::Div => "/",
         }
+    }
+}
+
+impl fmt::Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -516,7 +523,7 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
 
 /// How many items a [`Stack`] holds before it needs the heap: enough for
 /// any ordinary expression.
-const INLINE: usize = 8;
+const INLINE: usize = 4;
 
 /// A stack for `evaluate` that keeps its first [`INLINE`] items in place,
 /// so evaluating an ordinary expression doesn't allocate; only a long chain
@@ -565,12 +572,11 @@ impl<T: Copy> Stack<T> {
 
 /// A comparison or arithmetic operator applied to two evaluated operands.
 fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
-    let sym = op.as_str();
     let pair = || format!("{} and {}", a.kind(), c.kind());
     match op {
         Op::Eq | Op::Ne => {
             if a.is_list() || c.is_list() {
-                return Err(format!("\"{sym}\" can't compare {}", pair()));
+                return Err(format!("\"{op}\" can't compare {}", pair()));
             }
             Ok(V::Bool(strict_eq(a, c) == (op == Op::Eq)))
         }
@@ -581,7 +587,7 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
                 (V::Str(x), V::Str(y)) => Some(x.cmp(y)),
                 _ => {
                     return Err(format!(
-                        "\"{sym}\" needs two numbers or two texts, got {}",
+                        "\"{op}\" needs two numbers or two texts, got {}",
                         pair()
                     ));
                 }
@@ -598,7 +604,7 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
         }
         Op::Add | Op::Sub | Op::Mul | Op::Div => {
             let (V::Num(x, _), V::Num(y, _)) = (a, c) else {
-                return Err(format!("\"{sym}\" needs numbers, got {}", pair()));
+                return Err(format!("\"{op}\" needs numbers, got {}", pair()));
             };
             let result = match op {
                 Op::Add => x + y,
@@ -610,7 +616,7 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
                 return Err("\"/\" divided by zero".into());
             }
             if !result.is_finite() {
-                return Err(format!("\"{sym}\" gave {}", non_finite(result)));
+                return Err(format!("\"{op}\" gave {}", non_finite(result)));
             }
             Ok(V::Num(result, None))
         }

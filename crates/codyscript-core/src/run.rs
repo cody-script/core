@@ -22,6 +22,8 @@
 //! isn't debugged doesn't pay for it. A debugged run does nothing at once:
 //! every step is a task of its own, so it can pause before any of them.
 
+use std::sync::Arc;
+
 use crate::debug::{Frame, Node, Session};
 use crate::engine::{Limits, RunOptions, RunResult, Variables};
 use crate::error::{Cause, Details, Error, ErrorCode};
@@ -434,13 +436,12 @@ impl<'p> Machine<'p, '_> {
         {}
     }
 
-    /// The arguments on the value stack, by name, taken off it.
+    /// The arguments on the value stack, by name, taken off it. (A call's
+    /// argument names are distinct: they're an object's keys.)
     fn arguments(&mut self, args: &[(String, Input)]) -> Map {
         let at = self.values.len().saturating_sub(args.len());
-        let mut map = Map::with_capacity(args.len());
         let names = args.iter().map(|(name, _)| name.clone());
-        map.extend(names.zip(self.values.drain(at..)));
-        map
+        Map::from_unique(names.zip(self.values.drain(at..)).collect())
     }
 
     /// Calls an external function — the host's — with the arguments on the
@@ -448,7 +449,7 @@ impl<'p> Machine<'p, '_> {
     async fn call_external(&mut self, external: &External, node: &Input) -> Result<Value, Error> {
         let tag = node.tag.as_deref();
         let call = ExecutorCall {
-            op: external.op().to_owned(),
+            op: Arc::clone(&external.op),
             arg: external.arg.clone(),
             input: self.arguments(&external.args),
             signal: self.meter.signal.clone(),

@@ -6,11 +6,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use crate::error::{BoxError, Cause};
 use crate::value::{Map, Value};
 
-/// A boxed, `Send` future, as executors return.
+/// A boxed, `Send` future, as an async executor's or a debugger's.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// What an executor produces: a value (`Value::Null` for nothing), or an
@@ -18,18 +19,113 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type ExecutorResult = Result<Value, BoxError>;
 
 /// What an executor is called with: one call of one of its functions.
+///
+/// The function's name and `arg` are shared with the compiled program, so a
+/// call copies neither; read them with [`op`](ExecutorCall::op) and
+/// [`arg`](ExecutorCall::arg). The arguments, `input`, are the call's own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutorCall {
+    pub(crate) op: Arc<str>,
+    pub(crate) arg: Option<Arc<Value>>,
+    /// The call's arguments, resolved, in program order (empty when it has none).
+    pub input: Map,
+    pub(crate) signal: Option<Signal>,
+}
+
+impl ExecutorCall {
+    /// A call of function `op` with `input`, and no `arg` or signal: what
+    /// a host needs to test an executor. (Runs make their own.)
+    pub fn new(op: impl Into<Arc<str>>, input: Map) -> Self {
+        ExecutorCall {
+            op: op.into(),
+            arg: None,
+            input,
+            signal: None,
+        }
+    }
+
+    /// Sets the call's `arg`.
+    pub fn with_arg(mut self, arg: impl Into<Arc<Value>>) -> Self {
+        self.arg = Some(arg.into());
+        self
+    }
+
+    /// Sets the run's signal.
+    pub fn with_signal(mut self, signal: Signal) -> Self {
+        self.signal = Some(signal);
+        self
+    }
+
     /// Which of the executor's functions: its name after the executor id
     /// and the first dot (`trim` for `text.trim`, `round.up` for
     /// `num.round.up`). Always one the executor was registered with.
-    pub op: String,
+    pub fn op(&self) -> &str {
+        &self.op
+    }
+
     /// `arg` from the program, if any.
-    pub arg: Option<Value>,
-    /// The call's arguments, resolved, in program order (empty when it has none).
-    pub input: Map,
+    pub fn arg(&self) -> Option<&Value> {
+        self.arg.as_deref()
+    }
+
     /// The run's abort signal, if one was given.
-    pub signal: Option<Signal>,
+    pub fn signal(&self) -> Option<&Signal> {
+        self.signal.as_ref()
+    }
+}
+
+/// What an executor returns: its result at once, or a future of it.
+///
+/// A synchronous executor's result needs no allocation
+/// ([`ready`](ExecutorFuture::ready), or `.into()` from an
+/// [`ExecutorResult`]); an asynchronous one is boxed
+/// ([`new`](ExecutorFuture::new)).
+pub struct ExecutorFuture<'a>(Pending<'a>);
+
+enum Pending<'a> {
+    /// The result, until it's taken.
+    Ready(Option<ExecutorResult>),
+    Future(BoxFuture<'a, ExecutorResult>),
+}
+
+impl<'a> ExecutorFuture<'a> {
+    /// A result there already.
+    pub fn ready(result: ExecutorResult) -> Self {
+        ExecutorFuture(Pending::Ready(Some(result)))
+    }
+
+    /// A result still to come: `future`'s, boxed.
+    pub fn new(future: impl Future<Output = ExecutorResult> + Send + 'a) -> Self {
+        ExecutorFuture(Pending::Future(Box::pin(future)))
+    }
+}
+
+impl From<ExecutorResult> for ExecutorFuture<'_> {
+    fn from(result: ExecutorResult) -> Self {
+        ExecutorFuture::ready(result)
+    }
+}
+
+impl Future for ExecutorFuture<'_> {
+    type Output = ExecutorResult;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<ExecutorResult> {
+        match &mut self.0 {
+            Pending::Ready(result) => {
+                Poll::Ready(result.take().expect("an executor's result, polled once"))
+            }
+            Pending::Future(future) => future.as_mut().poll(cx),
+        }
+    }
+}
+
+impl fmt::Debug for ExecutorFuture<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self.0 {
+            Pending::Ready(_) => "ExecutorFuture(ready)",
+            Pending::Future(_) => "ExecutorFuture(pending)",
+        })
+    }
 }
 
 /// Host code that provides external functions: registered under an id
@@ -47,18 +143,20 @@ pub struct ExecutorCall {
 /// [`EngineBuilder::executor`]: crate::EngineBuilder::executor
 /// [`EngineBuilder::async_executor`]: crate::EngineBuilder::async_executor
 pub trait Executor: Send + Sync {
-    /// Runs one call.
-    fn call(&self, call: ExecutorCall) -> BoxFuture<'_, ExecutorResult>;
+    /// Runs one call: returns its result at once
+    /// ([`ExecutorFuture::ready`]), or a future of it
+    /// ([`ExecutorFuture::new`]).
+    fn call(&self, call: ExecutorCall) -> ExecutorFuture<'_>;
 }
 
 impl<E: Executor + ?Sized> Executor for Arc<E> {
-    fn call(&self, call: ExecutorCall) -> BoxFuture<'_, ExecutorResult> {
+    fn call(&self, call: ExecutorCall) -> ExecutorFuture<'_> {
         (**self).call(call)
     }
 }
 
 impl<E: Executor + ?Sized> Executor for Box<E> {
-    fn call(&self, call: ExecutorCall) -> BoxFuture<'_, ExecutorResult> {
+    fn call(&self, call: ExecutorCall) -> ExecutorFuture<'_> {
         (**self).call(call)
     }
 }
@@ -88,8 +186,8 @@ impl<F> Executor for FnExecutor<F>
 where
     F: Fn(ExecutorCall) -> ExecutorResult + Send + Sync,
 {
-    fn call(&self, call: ExecutorCall) -> BoxFuture<'_, ExecutorResult> {
-        Box::pin(std::future::ready((self.0)(call)))
+    fn call(&self, call: ExecutorCall) -> ExecutorFuture<'_> {
+        ExecutorFuture::ready((self.0)(call))
     }
 }
 
@@ -107,7 +205,7 @@ pub struct AsyncFnExecutor<F>(F);
 ///
 /// ```
 /// use codyscript_core::{executor, Executor};
-/// let echo = executor::from_async_fn(|call| async move { Ok(call.arg.unwrap_or_default()) });
+/// let echo = executor::from_async_fn(|call| async move { Ok(call.arg().cloned().unwrap_or_default()) });
 /// # let _: &dyn Executor = &echo;
 /// ```
 pub fn from_async_fn<F, Fut>(f: F) -> AsyncFnExecutor<F>
@@ -123,8 +221,8 @@ where
     F: Fn(ExecutorCall) -> Fut + Send + Sync,
     Fut: Future<Output = ExecutorResult> + Send + 'static,
 {
-    fn call(&self, call: ExecutorCall) -> BoxFuture<'_, ExecutorResult> {
-        Box::pin((self.0)(call))
+    fn call(&self, call: ExecutorCall) -> ExecutorFuture<'_> {
+        ExecutorFuture::new((self.0)(call))
     }
 }
 

@@ -271,11 +271,16 @@ RunResult { value: Value, variables: Map, steps: u64 }
   ones they provide: `.executor("text", ["trim", "empty"], f)` provides
   `text.trim` and `text.empty`, and `compile` checks every function a
   program declares in `ext` against that list. A call of one reaches the
-  executor as an `ExecutorCall { op, arg, input, signal }` — `op` is which
-  of its functions (`"trim"`) — and it returns
-  `Result<Value, BoxError>` (`Value::Null` for nothing), directly or from a
-  `Send` future. Registering an id again replaces its executor and its list. `BoxError` converts from any error and from strings, so `?`
-  and `Err("…".into())` work. Each engine owns its executors; there is no
+  executor as an `ExecutorCall`: `call.op()` is which of its functions
+  (`"trim"`), `call.arg()` the program's `arg`, `call.input` the resolved
+  arguments, `call.signal()` the run's signal. The function's name and
+  `arg` are shared with the compiled program, not copied for each call. It
+  returns `Result<Value, BoxError>` (`Value::Null` for nothing), directly
+  or from a `Send` future. A custom `Executor` returns an `ExecutorFuture`:
+  `ExecutorFuture::ready(result)` (or `result.into()`) answers at once with
+  no allocation, `ExecutorFuture::new(future)` boxes a future. Registering
+  an id again replaces its executor and its list. `BoxError` converts from
+  any error and from strings, so `?` and `Err("…".into())` work. Each engine owns its executors; there is no
   global registry. `Engine` is cheap to clone, and `Engine` and
   `CompiledProgram` are `Send + Sync`, so one compiled program can serve
   many runs at once.
@@ -492,18 +497,31 @@ CodyScript began as a port of the TypeScript package `@cody-script/core`;
 since 0.9 it no longer follows it (see below), and earlier notes mention it
 for history only.
 
-### 0.9 → 0.10 (faster compiling; two methods removed)
+### 0.9 → 0.10 (faster compiling and calls; API changes)
 
 The program format, behaviour, messages and error codes are unchanged.
-Compiling is 30–35% faster and allocates less than half as much, and a
-compiled program takes 20–50% less memory, because it no longer keeps a
-copy of the program it was compiled from. That copy is gone from
-the API:
+Compiling is 32–37% faster and allocates less than half as much; a
+compiled program takes 20–50% less memory. Runs that call executors are
+15–25% faster, and loops that read variables 7–16%. What changed in the
+API:
 
-- **`CompiledProgram::program()` is removed.** Keep the program yourself if
-  you need it after compiling.
+- **`CompiledProgram::program()` is removed**: a compiled program no
+  longer keeps a copy of the program it was compiled from. Keep the
+  program yourself if you need it after compiling.
 - **`Engine::compile_owned(program)` is removed**: it existed only to skip
-  the copy. Use `engine.compile(&program)`, which no longer copies.
+  that copy. Use `engine.compile(&program)`, which no longer copies.
+- **`ExecutorCall`'s `op`, `arg` and `signal` are methods**, no longer
+  fields: `call.op()` (a `&str`: `match call.op() { "trim" => … }`),
+  `call.arg()` (`Option<&Value>`), `call.signal()`. The function's name
+  and `arg` are shared with the compiled program instead of copied for
+  each call. `call.input` is still a field. To test an executor, make a
+  call with `ExecutorCall::new(op, input)`, `.with_arg(…)` and
+  `.with_signal(…)`.
+- **A custom `Executor` returns an `ExecutorFuture`** rather than a
+  `BoxFuture`: `ExecutorFuture::ready(result)` (or `result.into()`) for a
+  result it has at once, which needs no allocation, or
+  `ExecutorFuture::new(future)` for one to await. Executors made with
+  `.executor(…)` and `.async_executor(…)` need no change.
 - `CompiledProgram`'s `Debug` shows its compiled tree.
 
 ### 0.8 → 0.9 (its own semantics, not JavaScript's)

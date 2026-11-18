@@ -270,7 +270,7 @@ pub struct EngineBuilder {
 impl EngineBuilder {
     /// Provides the external functions `<id>.<function>`, one for each of
     /// `functions`, handled by `f`, which returns its result directly;
-    /// `call.op` says which function was called.
+    /// `call.op()` says which function was called.
     ///
     /// `.executor("text", ["trim", "empty"], f)` provides `text.trim` and
     /// `text.empty`, which a program may then declare in its `ext` (as

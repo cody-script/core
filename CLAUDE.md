@@ -63,7 +63,9 @@ crates/
                      #   Program is its body and its `fn` functions; a call
                      #   is resolved to an External or a function index
       expression.rs  # The `x` language: tokenizer, parser, evaluator
-      executor.rs    # Executor trait, ExecutorCall, Signal, closure adapters
+      executor.rs    # Executor trait, ExecutorCall (op/arg shared with the
+                     #   tree), ExecutorFuture (no box for a sync result),
+                     #   Signal, closure adapters
                      #   (engine.rs registers each with its function names)
       error.rs       # Error, ErrorCode, Issue, Details
     tests/

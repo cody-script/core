@@ -42,6 +42,19 @@ impl Map {
         }
     }
 
+    /// A map of `entries`, whose keys are known to be distinct (a call's
+    /// arguments): built without checking each key against the others.
+    pub(crate) fn from_unique(entries: Vec<(String, Value)>) -> Self {
+        let mut map = Map {
+            entries,
+            index: None,
+        };
+        if map.entries.len() > INDEX_THRESHOLD {
+            map.rebuild_index();
+        }
+        map
+    }
+
     /// How many entries there are.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -55,7 +68,12 @@ impl Map {
     fn position(&self, key: &str) -> Option<usize> {
         match &self.index {
             Some(index) => index.get(key).copied(),
-            None => self.entries.iter().position(|(k, _)| k == key),
+            // Keys are short, mostly: comparing their bytes in place beats
+            // calling `memcmp` for each.
+            None => self
+                .entries
+                .iter()
+                .position(|(k, _)| k.len() == key.len() && k.bytes().eq(key.bytes())),
         }
     }
 
@@ -80,13 +98,7 @@ impl Map {
         if let Some(i) = self.position(&key) {
             return Some(std::mem::replace(&mut self.entries[i].1, value));
         }
-        if let Some(index) = &mut self.index {
-            index.insert(key.clone(), self.entries.len());
-        }
-        self.entries.push((key, value));
-        if self.index.is_none() && self.entries.len() > INDEX_THRESHOLD {
-            self.rebuild_index();
-        }
+        self.push(key, value);
         None
     }
 
@@ -96,7 +108,7 @@ impl Map {
         if self.position(&key).is_some() {
             return Err((key, value));
         }
-        self.insert(key, value);
+        self.push(key, value);
         Ok(())
     }
 
@@ -105,11 +117,22 @@ impl Map {
         let i = match self.position(key) {
             Some(i) => i,
             None => {
-                self.insert(key.to_owned(), Value::Null);
+                self.push(key.to_owned(), Value::Null);
                 self.entries.len() - 1
             }
         };
         &mut self.entries[i].1
+    }
+
+    /// Adds an entry last, for a key that isn't there.
+    fn push(&mut self, key: String, value: Value) {
+        if let Some(index) = &mut self.index {
+            index.insert(key.clone(), self.entries.len());
+        }
+        self.entries.push((key, value));
+        if self.index.is_none() && self.entries.len() > INDEX_THRESHOLD {
+            self.rebuild_index();
+        }
     }
 
     /// Removes `key`, keeping the others in order; returns its value.

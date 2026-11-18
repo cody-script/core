@@ -692,7 +692,9 @@ fn a_signal_aborts_a_run() {
     let signal = Signal::new();
     let engine = Engine::builder()
         .executor("stop", ["x"], |call| {
-            call.signal.expect("the run's signal").abort_with("enough");
+            call.signal()
+                .expect("the run's signal")
+                .abort_with("enough");
             Ok(value!(true))
         })
         .build();

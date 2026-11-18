@@ -58,21 +58,13 @@ pub(crate) struct External {
     pub executor: Arc<dyn Executor>,
     /// The function's full name, as called: `text.trim`.
     pub name: String,
-    /// Where its first dot is: its executor's id comes before, its name
-    /// within the executor (what the executor is called with) after.
-    pub dot: usize,
+    /// Its name within its executor, what follows the first dot (`trim`):
+    /// shared with every call.
+    pub op: Arc<str>,
     /// The arguments to resolve, in order.
     pub args: Vec<(String, Input)>,
-    /// The static `arg`, passed as written.
-    pub arg: Option<Value>,
-}
-
-impl External {
-    /// The function's name within its executor: what follows the first dot
-    /// (`trim` in `text.trim`).
-    pub fn op(&self) -> &str {
-        &self.name[self.dot + 1..]
-    }
+    /// The static `arg`, passed as written: shared with every call.
+    pub arg: Option<Arc<Value>>,
 }
 
 impl fmt::Debug for External {

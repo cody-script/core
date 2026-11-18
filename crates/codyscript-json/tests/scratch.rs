@@ -92,21 +92,21 @@ fn executors() -> Engine {
                 .get("value")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            Ok(match call.op.as_str() {
+            Ok(match call.op() {
                 "trim" => text.trim().into(),
                 _ => text.is_empty().into(),
             })
         })
         .executor("slow", ["wait"], move |call| {
-            let id = call.arg.as_ref().and_then(|arg| arg.get("id")).cloned();
+            let id = call.arg().and_then(|arg| arg.get("id")).cloned();
             let order = order.fetch_add(1, Ordering::Relaxed) + 1;
             Ok(value!({ "id": id, "order": order }))
         })
         .executor("pair", ["x"], |call| Ok(Value::Object(call.input)))
         .executor("fail", ["throw", "reject"], |call| {
-            Err(match call.arg {
-                Some(Value::String(message)) => message.into(),
-                arg => codyscript_json::to_string(&arg.unwrap_or(Value::Null))
+            Err(match call.arg() {
+                Some(Value::String(message)) => message.as_str().into(),
+                arg => codyscript_json::to_string(&arg.unwrap_or(&Value::Null))
                     .unwrap()
                     .into(),
             })

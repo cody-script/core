@@ -97,10 +97,11 @@ fn may_fail(v: &Value) -> bool {
     }
 }
 
-/// An external function a program declares: where its full name's first
-/// dot is, and the executor that provides it (`None` if the engine doesn't,
-/// which is already an issue).
-type Declared = (usize, Option<Arc<dyn Executor>>);
+/// An external function a program declares: its name within its executor
+/// (`trim` for `text.trim`), shared by every call of it, and the executor
+/// that provides it (`None` if the engine doesn't, which is already an
+/// issue).
+type Declared = (Arc<str>, Option<Arc<dyn Executor>>);
 
 /// What a call's name refers to.
 enum Target {
@@ -429,7 +430,7 @@ impl Walk<'_> {
                         tag: None,
                     });
                 }
-                self.externals.insert(name, (exe.len(), executor));
+                self.externals.insert(name, (op.into(), executor));
             }
         }
     }
@@ -566,14 +567,14 @@ impl Walk<'_> {
         }
         Some(match call? {
             (Target::Function(function), args) => InputKind::Call(Call { function, args }),
-            (Target::External(name, (dot, executor)), args) => {
+            (Target::External(name, (op, executor)), args) => {
                 InputKind::External(Box::new(External {
                     // An unknown function is already an issue.
                     executor: executor?,
+                    op,
                     name,
-                    dot,
                     args,
-                    arg: arg.cloned(),
+                    arg: arg.cloned().map(Arc::new),
                 }))
             }
         })
