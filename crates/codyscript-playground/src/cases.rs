@@ -107,9 +107,9 @@ fn cases() -> Vec<Case> {
         ] }))
             .variables(value!({ "amount": 20000 }))
             .expect(value!({ "ok": true, "value": 300, "variables": { "fee": 300 } })),
-        case("Expressions: logic returns an operand", &value!({ "x": "missing_ok || (a + 2) * 3 / 4 > 1 && s" }))
-            .variables(value!({ "missing_ok": null, "a": 2, "s": "yes" }))
-            .returns(value!("yes")),
+        case("Expressions: a default for null, and logic on booleans", &value!({ "x": "(maybe ?? 0) + (a + 2) * 3 / 4 > 1 && ok" }))
+            .variables(value!({ "maybe": null, "a": 2, "ok": true }))
+            .returns(value!(true)),
         case("A loop: the sum of 1..n", &sum)
             .variables(value!({ "n": 1000 }))
             .returns(value!(500500)),
@@ -142,7 +142,7 @@ fn cases() -> Vec<Case> {
         case("Debugging: step into a function, step over what's left of it", &clean_name)
             .variables(value!({ "Name": "  Ada " }))
             .breakpoints([Breakpoint::path("/do/0")])
-            .debug(&["stepInto", "stepInto", "stepInto", "stepOver"], &[
+            .debug(&["step_into", "step_into", "step_into", "step_over"], &[
                 ("/do/0", "breakpoint"), ("/do/0/set/name", "step"),
                 ("/do/0/set/name/call/text.clean/value", "step"), ("/fn/text.clean", "step"), ("/do/1", "step")
             ])
@@ -150,7 +150,7 @@ fn cases() -> Vec<Case> {
         case("Debugging: step over a whole loop, on to the step after it", &sum)
             .variables(value!({ "n": 100 }))
             .breakpoints([Breakpoint::path("/do/2")])
-            .debug(&["stepOver"], &[("/do/2", "breakpoint"), ("/do/3", "step")])
+            .debug(&["step_over"], &[("/do/2", "breakpoint"), ("/do/3", "step")])
             .returns(value!(5050)),
         case("Debugging: stop ends the run", &readme)
             .variables(value!({ "Name": "Ada" }))
@@ -165,6 +165,9 @@ fn cases() -> Vec<Case> {
         case("A missing variable", &readme).expect(value!({ "ok": false, "error": {
             "code": "undefined_variable", "path": "/do/0/set/name/call/text.trim/value"
         } })),
+        case("An if whose test isn't a boolean", &value!({ "do": [{ "if": { "ref": "n" }, "do": [] }] }))
+            .variables(value!({ "n": 1 }))
+            .fails("type_error", r#""if" needs a boolean, got number at /do/0/if"#),
         case("Division by zero", &value!({ "x": "1 / z" }))
             .variables(value!({ "z": 0 }))
             .fails("type_error", r#""/" divided by zero in "1 / z" at /x"#),
@@ -173,10 +176,10 @@ fn cases() -> Vec<Case> {
             .fails("function_failed", r#"Function "fail.throw" failed: boom at /do/0/set/x (tag n1)"#),
         case("A rejecting function", &value!({ "ext": { "fail": ["reject"] }, "call": { "fail.reject": {} }, "arg": "nope" }))
             .fails("function_failed", r#"Function "fail.reject" failed: nope"#),
-        case("An endless loop stops at maxSteps", &value!({ "do": [{ "for": true, "do": [], "tag": "spin" }] }))
-            .limits(value!({ "maxSteps": 50 }))
+        case("An endless loop stops at max_steps", &value!({ "do": [{ "for": true, "do": [], "tag": "spin" }] }))
+            .limits(value!({ "max_steps": 50 }))
             .fails("step_limit", "Program exceeded 50 steps at /do/0/for"),
-        case("Endless recursion stops at maxDepth", &value!({
+        case("Endless recursion stops at max_depth", &value!({
             "call": { "spin": {} },
             "fn": { "spin": { "call": { "spin": {} }, "tag": "again" } }
         }))
@@ -198,15 +201,15 @@ fn cases() -> Vec<Case> {
             .expect(value!({ "ok": false, "error": { "code": "invalid_program" } })),
         text_case("100 000-deep JSON is refused, not a crash", format!("{}1{}", "[".repeat(100_000), "]".repeat(100_000)))
             .expect(value!({ "ok": false, "error": { "code": "invalid_program" } })),
-        case("A 100 000-term expression stops at maxSteps, not a crash", &value!({ "x": vec!["1"; 100_000].join("+") }))
+        case("A 100 000-term expression stops at max_steps, not a crash", &value!({ "x": vec!["1"; 100_000].join("+") }))
             .expect(value!({ "ok": false, "error": { "code": "step_limit" } })),
         case("A 100 000-iteration loop finishes", &sum)
             .variables(value!({ "n": 100_000 }))
-            .limits(value!({ "maxSteps": 10_000_000 }))
+            .limits(value!({ "max_steps": 10_000_000 }))
             .returns(value!(5_000_050_000_u64)),
         case("10 000-deep recursion finishes: calls don't use the stack", &recursive_sum)
             .variables(value!({ "n": 9_999 }))
-            .limits(value!({ "maxDepth": 10_000, "maxSteps": 10_000_000 }))
+            .limits(value!({ "max_depth": 10_000, "max_steps": 10_000_000 }))
             .returns(value!(49_995_000)),
         case("The module still works after all that", &readme)
             .variables(value!({ "Name": " again " }))

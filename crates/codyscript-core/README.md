@@ -83,8 +83,8 @@ as written, is only for external ones.
 |---|---|---|
 | `set` | `{ "set": { "name": <input> } }` | Assigns one variable in the current scope. |
 | `ret` | `{ "ret": <input> }` | Ends the enclosing block with that value. |
-| `if` | `{ "if": <input>, "do": […], "el"?: […] }` | Runs `do` if the test is truthy, else `el`. |
-| `for` | `{ "for": <input>, "do": […] }` | Runs `do` while the test is truthy. |
+| `if` | `{ "if": <input>, "do": […], "el"?: […] }` | Runs `do` if the test is `true`, else `el`. The test must be a boolean. |
+| `for` | `{ "for": <input>, "do": […] }` | Runs `do` while the test is `true`. The test must be a boolean. |
 
 ### Expressions
 
@@ -96,17 +96,20 @@ implement the same way, in a fraction of the bytes:
 | Values | numbers (`2`, `0.03`), text in single quotes (`'paid'`, `'it\'s'`; escapes `\n`, `\t`, `\\`, `\'`), `true`, `false`, `null`, variable names (`gross_sales`) |
 | Arithmetic | `+ - * /`, unary `-`, parentheses — numbers only |
 | Comparison | `== !=` (numbers, text, booleans, `null`; strict, so `1 == '1'` is false); `< <= > >=` (two numbers or two texts). One per level: `a < b < c` is refused — write `a < b && b < c` |
-| Logic | `&&` and `\|\|` short-circuit and return an operand (`discount \|\| 0`); `!` |
+| Logic | `&&`, `\|\|` and `!`, on booleans only; `&&` and `\|\|` short-circuit |
+| Default | `??`: the left side unless it's `null`, else the right (`discount ?? 0`), like Rust's `Option::unwrap_or`; the right side is evaluated only when needed |
 
-Precedence, loosest first: `||`, `&&`, comparisons, `+ -`, `* /`, unary.
+Precedence, loosest first: `??`, `||`, `&&`, comparisons, `+ -`, `* /`,
+unary.
 Expressions don't call functions: for text, dates and everything else, use
 `call`.
 
 Expressions are parsed when the program is compiled, so a syntax error is an
 `invalid_program` at that node's `/x`. Running one never re-parses it, never
 evaluates anything as code, and counts a step per operator and operand.
-Mixing types (`1 + 'a'`, `'a' < 1`), comparing a list or object, or dividing
-by zero is a `type_error` naming the operator and the expression.
+Mixing types (`1 + 'a'`, `'a' < 1`, `!0`, `1 && true`), comparing a list
+or object, or dividing by zero is a `type_error` naming the operator and the
+expression.
 
 A fuller example — a 3% fee on a CSV `Amount`, capped at 300:
 
@@ -198,8 +201,15 @@ side at the program's root:
   `3.0`). Equality is numeric: `1 == 1.0`.
 - **Text** compares by Unicode code point, as Rust's `str` does (`'Z' <
   'a'`).
-- **Truthiness**: `false`, `0`, `NaN`, `""` and `null` are false; everything
-  else, including `[]` and `{}`, is true.
+- **Booleans are strict**, as in Rust: `if` and `for` tests, `!`, `&&` and
+  `||` take only `true` or `false`. There's no truthiness — `if amount` with
+  `amount` a number is a `type_error`; write `if amount > 0`.
+- **`null` is CodyScript's `None`**: the value for "nothing" (a block that
+  doesn't `ret`, an executor with nothing to return, a missing field in
+  data — `Option::None` is what serde writes as `null`). Like `None`, it
+  can't be used as anything else: arithmetic, ordering and logic on it are
+  `type_error`s. Test for it with `== null`, replace it with `??`, or pass
+  it on. A variable that doesn't exist is an error, not `null`.
 - **Scope**: a nested block reads its enclosing variables, but `set` inside it
   assigns its own — nothing leaks out, and its `ret` returns only from it. A
   top-level block runs in the root scope, so its assignments are returned as
@@ -227,7 +237,7 @@ them in programs.
 - Convert with any serde format: `Value`, `Map` and `Number` implement
   `Serialize` and `Deserialize` (an object with a repeated key is refused);
   so do `RunResult` (`{ value, variables,
-  steps }`), `Limits` (`{ maxSteps, maxDepth }`), `RunConfig` (`{
+  steps }`), `Limits` (`{ max_steps, max_depth }`), `RunConfig` (`{
   variables, breakpoints }`, see [Debugging](#debugging)), `ErrorCode` and
   `Issue`, and `Error` serializes as `{ code, message, path, tag?, issues?
   }`.
@@ -489,7 +499,7 @@ for history only.
 CodyScript no longer matches the TypeScript package's behaviour and
 messages: where those followed JavaScript, it now has rules of its own,
 closer to Rust's. The program format, the Rust API and the error codes are
-unchanged. What changed:
+unchanged; field names in data are now snake_case. What changed:
 
 | | 0.8 | 0.9 |
 |---|---|---|
@@ -503,11 +513,20 @@ unchanged. What changed:
 | Overflow (`big * 10`) | `"*" gave Infinity (division by zero?)` | `"*" gave Infinity` |
 | An unexpected token | `Unexpected 2`, `Unexpected "a"` (as `JSON.stringify` writes it) | as written: `Unexpected "2"`, `Unexpected "'a'"` |
 | Unterminated text | `Unexpected "'"` | `Text has no closing "'"` |
+| `if` / `for` tests, `!`, `&&`, `\|\|` | any value, by truthiness (`0`, `""`, `null`, `NaN` false) | booleans only; anything else is a `type_error` (`"if" needs a boolean, got number`) |
+| `a && b`, `a \|\| b` | returned an operand (`discount \|\| 0`) | return a boolean; for a default, `discount ?? 0` |
+| `??` | — | new: the left side unless it's `null`, else the right |
+| Field names in data | `maxSteps`, `maxDepth` (`Limits`); `"stepOver"`, `"stepInto"` (`Action`) | snake_case, as Rust and the error codes already are: `max_steps`, `max_depth`; `"step_over"`, `"step_into"` |
 
-A stored rule is affected only if it uses one of these: a `\n` or `\t` in
-text (whose meaning changes), another escape such as `\q` (now refused),
-text comparisons involving characters from U+E000 to U+FFFF and ones above
-U+FFFF, or an overflowing literal. Truthiness and `&&`/`||` are unchanged.
+Stored rules most likely to be affected are those that rely on
+truthiness: an `if` or `for` whose test isn't a boolean, `!` on a
+non-boolean, or `x || default` (now `x ?? default`). Each now fails with a
+`type_error` naming the test, rather than silently choosing. Otherwise, a
+rule is affected only if it uses a `\n` or `\t` in text (whose meaning
+changes), another escape such as `\q` (now refused), text comparisons
+between characters from U+E000 to U+FFFF and ones above U+FFFF, or an
+overflowing literal. Stored limits and debugger actions need their new
+names (`max_steps`, `"step_over"`), in JavaScript too.
 
 ### 0.7 → 0.8 (one way to run; API only)
 

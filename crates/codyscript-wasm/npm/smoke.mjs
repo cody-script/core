@@ -62,7 +62,7 @@ assert.equal(check(program, config, executors, ""), '{"ok":true}');
 const pauses = [];
 const debugged = JSON.parse(await debug(program, config, executors, "", async (pause) => {
 	pauses.push(`${pause.path} (${pause.reason})`);
-	return "stepOver";
+	return "step_over";
 }));
 assert.equal(debugged.value, "Ada");
 assert.deepEqual(pauses, ["/do/1 (breakpoint)", "/do/2 (step)"]);

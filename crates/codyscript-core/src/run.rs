@@ -99,12 +99,13 @@ enum Task<'p> {
     Assign(&'p str),
     /// End the current block with the value.
     Return,
-    /// Run `then` if the value is truthy, else `otherwise`.
+    /// Run `then` if the value (`test`'s) is `true`, else `otherwise`.
     Branch {
+        test: &'p Input,
         then: &'p [Instruction],
         otherwise: Option<&'p [Instruction]>,
     },
-    /// If the value (the loop's test) is truthy, run `body` and test again.
+    /// If the value (the loop's test) is `true`, run `body` and test again.
     Loop {
         test: &'p Input,
         body: &'p [Instruction],
@@ -234,15 +235,19 @@ impl<'p> Machine<'p, '_> {
                 }
             }
             Task::Return => self.ret(),
-            Task::Branch { then, otherwise } => {
-                if truthy(&self.pop()) {
+            Task::Branch {
+                test,
+                then,
+                otherwise,
+            } => {
+                if self.test("if", test)? {
                     self.list::<DEBUGGED>(then)?;
                 } else if let Some(otherwise) = otherwise {
                     self.list::<DEBUGGED>(otherwise)?;
                 }
             }
             Task::Loop { test, body } => {
-                if truthy(&self.pop()) {
+                if self.test("for", test)? {
                     self.tasks.push(Task::Loop { test, body });
                     self.tasks.push(Task::Resolve(test));
                     self.list::<DEBUGGED>(body)?;
@@ -346,6 +351,7 @@ impl<'p> Machine<'p, '_> {
                 otherwise,
             } => {
                 self.tasks.push(Task::Branch {
+                    test,
                     then,
                     otherwise: otherwise.as_deref(),
                 });
@@ -497,6 +503,27 @@ impl<'p> Machine<'p, '_> {
         &mut self.scopes[last]
     }
 
+    /// The value of `instruction`'s `test`, which must be a boolean.
+    fn test(&mut self, instruction: &str, test: &Input) -> Result<bool, Error> {
+        match self.pop() {
+            Value::Bool(b) => Ok(b),
+            other => {
+                let message = format!(
+                    "\"{instruction}\" needs a boolean, got {}",
+                    expression::kind(&other)
+                );
+                let tag = test.tag.as_deref();
+                Err(failure(
+                    ErrorCode::TypeError,
+                    message,
+                    &test.path,
+                    tag,
+                    None,
+                ))
+            }
+        }
+    }
+
     /// The value a task needs. The machine always pushes one first.
     fn pop(&mut self) -> Value {
         self.values.pop().unwrap_or_default()
@@ -581,19 +608,4 @@ fn failure(
             cause,
         },
     )
-}
-
-/// Truthiness: `false`, `0`, `NaN`, `""` and `null` are false; everything
-/// else, including `[]` and `{}`, is true.
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => {
-            let n = n.as_f64();
-            n != 0.0 && !n.is_nan()
-        }
-        Value::String(s) => !s.is_empty(),
-        Value::Array(_) | Value::Object(_) => true,
-    }
 }

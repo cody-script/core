@@ -336,7 +336,7 @@ mod pausing {
         let program = compile(&uses_math(m(vec![
             tagged(set("a", tagged(value!({ "val": 1 }), "one")), "first"),
             set("b", m(vec![ret(x("a + 1"))])),
-            when(var("b"), vec![], Some(vec![])),
+            when(var("go"), vec![], Some(vec![])),
             lp(value!(false), vec![]),
             ret(call("math.add", value!({ "a": var("a"), "b": var("b") }))),
         ])));
@@ -353,7 +353,7 @@ mod pausing {
             StepInto
         });
         program
-            .run_blocking(RunOptions::new().with_debugger(at(&["/do/0"]), debugger))
+            .run_blocking(with_vars(value!({ "go": true })).with_debugger(at(&["/do/0"]), debugger))
             .unwrap();
         let s = |s: &str| Some(s.to_owned());
         assert_eq!(
@@ -373,7 +373,7 @@ mod pausing {
                 ),
                 // An expression's operands are steps, not pauses: 3 of them.
                 ("/do/2".into(), NodeKind::If, None, None, 9),
-                ("/do/2/if".into(), NodeKind::Ref, s("b"), None, 10),
+                ("/do/2/if".into(), NodeKind::Ref, s("go"), None, 10),
                 ("/do/3".into(), NodeKind::For, None, None, 11),
                 ("/do/3/for".into(), NodeKind::Val, None, None, 12),
                 ("/do/4".into(), NodeKind::Ret, None, None, 13),

@@ -338,12 +338,8 @@ mod instructions {
             value!("yes")
         );
         assert_eq!(
-            run(&engine, &program(value!(0))).unwrap().value,
+            run(&engine, &program(value!(false))).unwrap().value,
             value!("no")
-        );
-        assert_eq!(
-            run(&engine, &program(value!([]))).unwrap().value,
-            value!("yes")
         );
         let program = m(vec![when(
             val(value!(false)),
@@ -354,37 +350,43 @@ mod instructions {
     }
 
     #[test]
-    fn truthiness() {
+    fn if_and_for_need_a_boolean() {
         let engine = engine();
-        let falsy = [
-            value!(false),
+        for v in [
             value!(0),
-            value!(0.0),
-            value!(-0.0),
-            value!(""),
-            value!(null),
-        ];
-        let truthy = [
-            value!(true),
             value!(1),
-            value!(-0.5),
-            value!("0"),
+            value!(""),
+            value!("true"),
+            value!(null),
             value!([]),
             value!({}),
-        ];
-        for (values, expected) in [(&falsy, "no"), (&truthy, "yes")] {
-            for v in values.iter() {
-                let program = m(vec![when(
-                    val(v.clone()),
-                    vec![ret(value!("yes"))],
-                    Some(vec![ret(value!("no"))]),
-                )]);
-                assert_eq!(
-                    run(&engine, &program).unwrap().value,
-                    value!(expected),
-                    "{v:?}"
-                );
-            }
+        ] {
+            let kind = match &v {
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Null => "null",
+                Value::Array(_) => "list",
+                _ => "object",
+            };
+            let test = tagged(val(v.clone()), "t");
+            let branch = m(vec![when(test.clone(), vec![], None)]);
+            let error = failure(run(&engine, &branch));
+            assert_eq!(error.code(), ErrorCode::TypeError, "{v:?}");
+            assert_eq!(error.path(), "/do/0/if", "{v:?}");
+            assert_eq!(error.tag(), Some("t"));
+            assert_eq!(
+                error.message(),
+                format!(r#""if" needs a boolean, got {kind} at /do/0/if (tag t)"#),
+                "{v:?}"
+            );
+            let looped = m(vec![lp(test, vec![])]);
+            let error = failure(run(&engine, &looped));
+            assert_eq!(error.path(), "/do/0/for", "{v:?}");
+            assert_eq!(
+                error.message(),
+                format!(r#""for" needs a boolean, got {kind} at /do/0/for (tag t)"#),
+                "{v:?}"
+            );
         }
     }
 

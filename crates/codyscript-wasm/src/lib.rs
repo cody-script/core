@@ -9,7 +9,7 @@
 //!   slow: { echo: async ({ arg }) => { await new Promise((r) => setTimeout(r, 10)); return arg; } },
 //! };
 //! // Once: compile (throws a CodyScriptError if the program is invalid)…
-//! const program = compile(programJson, executors, '{"maxSteps":1000}');
+//! const program = compile(programJson, executors, '{"max_steps":1000}');
 //! // …then run as often as needed.
 //! const outcome = JSON.parse(await program.run('{"Name":" Ada "}'));
 //! // { ok: true, value, variables, steps }  or  { ok: false, error: { code, message, path, tag?, issues? } }
@@ -20,7 +20,7 @@
 //! // Debugging, with a run configuration: pause at the step tagged "fee",
 //! // then step over to the end.
 //! const config = '{"variables":{"amount":200},"breakpoints":[{"tag":"fee"}]}';
-//! const debugged = JSON.parse(await debug(programJson, config, executors, "", async (pause) => "stepOver"));
+//! const debugged = JSON.parse(await debug(programJson, config, executors, "", async (pause) => "step_over"));
 //! ```
 //!
 //! Values cross the boundary as JSON text, so this exercises the whole stack
@@ -117,7 +117,7 @@ impl Program {
 ///   receives `{ op, arg?, input }` (`op` is its own name) and returns a JSON
 ///   value, or a promise of one; `undefined` is `null`, and throwing (or
 ///   rejecting) fails the run with `function_failed`.
-/// - `limits`: JSON text like `{"maxSteps":1000,"maxDepth":64}`, or `""`.
+/// - `limits`: JSON text like `{"max_steps":1000,"max_depth":64}`, or `""`.
 ///
 /// Resolves with JSON text: `{"ok":true,"value":…,"variables":…,"steps":…}`,
 /// or `{"ok":false,"error":{…}}` for any CodyScript error (including a
@@ -178,7 +178,7 @@ pub fn steps(program: String, executors: JsValue, limits: String) -> Result<Stri
 /// receives `{ reason, path, kind, name?, tag?, function?, depth, steps,
 /// frames: [{ function?, call?, scopes }], breakpoints }` — the step, as
 /// [`steps`] lists it, and more — and returns, or resolves to (taking as
-/// long as it likes), how to go on: `"stepOver"`, `"stepInto"`,
+/// long as it likes), how to go on: `"step_over"`, `"step_into"`,
 /// `"continue"` or `"stop"`, or `{ action, breakpoints? }` to change the
 /// breakpoints too.
 ///
@@ -418,7 +418,8 @@ async fn ask(on_pause: &Function, pause: &Pause<'_>) -> Result<Reply, BoxError> 
         .and_then(|json| JsValue::from(json).as_string())
         .unwrap_or_else(|| "undefined".into());
     codyscript_json::from_str(&json).map_err(|_| {
-        let expected = r#""stepOver", "stepInto", "continue", "stop" or { action, breakpoints? }"#;
+        let expected =
+            r#""step_over", "step_into", "continue", "stop" or { action, breakpoints? }"#;
         format!("expected {expected}, got {json}").into()
     })
 }

@@ -48,8 +48,8 @@
   <div id="debugger" hidden>
     <label>Debugger</label>
     <div id="where"></div>
-    <button id="stepOver" title="Take this step, and all it calls">Step over</button>
-    <button id="stepInto" title="Pause at the very next step, inside this one or the function it calls">Step into</button>
+    <button id="step_over" title="Take this step, and all it calls">Step over</button>
+    <button id="step_into" title="Pause at the very next step, inside this one or the function it calls">Step into</button>
     <button id="continue" title="Run to the next breakpoint">Continue</button>
     <button id="stop" title="End the run here">Stop</button>
     <label>Call stack <small>— click a frame to see its variables</small></label><ul id="stack" class="box"></ul>
@@ -284,7 +284,7 @@ function paused(pause) {
   items[0].click(); // the paused step's own frame
 }
 
-const ACTIONS = ["stepOver", "stepInto", "continue", "stop"];
+const ACTIONS = ["step_over", "step_into", "continue", "stop"];
 
 // While debugging, nothing else runs and the program can't change.
 function debugging(on) {

@@ -219,7 +219,7 @@ async fn compile_errors_limits_and_expressions() {
     assert_eq!(not_json["error"]["code"], "invalid_program");
 
     let endless = r#"{ "do": [{ "for": true, "do": [] }] }"#;
-    let limited = run(endless, "", JsValue::NULL, r#"{"maxSteps":50}"#).await;
+    let limited = run(endless, "", JsValue::NULL, r#"{"max_steps":50}"#).await;
     assert_eq!(
         limited["error"]["message"],
         "Program exceeded 50 steps at /do/0/for"
@@ -401,7 +401,7 @@ async fn javascript_sets_breakpoints_and_steps_taking_its_time() {
         r#"(globalThis.__cody_pauses ??= []).push(pause);
            if (pause.reason === "step") return "continue";
            return new Promise((resolve) =>
-             setTimeout(() => resolve({ action: "stepOver", breakpoints: [] }), 5));"#,
+             setTimeout(() => resolve({ action: "step_over", breakpoints: [] }), 5));"#,
     );
     // The `if`, by its tag.
     let config =
@@ -445,7 +445,7 @@ async fn stepping_into_a_codyscript_function_shows_the_call_stack() {
         "do": [{ "ret": { "call": { "double": { "v": { "ref": "n" } } } } }] }"#;
     let debugger = on_pause(
         r#"(globalThis.__cody_stack ??= []).push(pause.frames);
-           return pause.path.startsWith("/fn/") ? "continue" : "stepInto";"#,
+           return pause.path.startsWith("/fn/") ? "continue" : "step_into";"#,
     );
     let config = r#"{ "variables": { "n": 21 }, "breakpoints": [{ "path": "/do/0" }] }"#;
     let outcome = debug(program, config, debugger).await.unwrap();
@@ -491,7 +491,7 @@ async fn a_failing_or_confused_debugger_rejects() {
         assert_eq!(
             confused,
             format!(
-                r#"onPause: expected "stepOver", "stepInto", "continue", "stop" or {{ action, breakpoints? }}, got {got}"#
+                r#"onPause: expected "step_over", "step_into", "continue", "stop" or {{ action, breakpoints? }}, got {got}"#
             ),
             "{body}"
         );
@@ -662,7 +662,7 @@ async fn deep_recursion_doesnt_use_the_stack() {
             { "ret": { "x": "n + rest" } }
         ] }
     } });
-    let limits = r#"{ "maxDepth": 10000, "maxSteps": 10000000 }"#;
+    let limits = r#"{ "max_depth": 10000, "max_steps": 10000000 }"#;
     let outcome = run(&to_json(&program), "", JsValue::NULL, limits).await;
     assert_eq!(outcome["value"], 49_995_000);
     let outcome = run(&to_json(&program), "", JsValue::NULL, "").await;

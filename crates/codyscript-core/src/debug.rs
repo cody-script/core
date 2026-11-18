@@ -38,7 +38,7 @@ use crate::value::Value;
 /// `/do/2`), but a tag moves with its node. A tag names every step that has
 /// it. [`Step::breakpoint`] makes the best breakpoint for a step.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum Breakpoint {
     /// The step at this path: a JSON Pointer into the program, as errors
     /// use.
@@ -104,10 +104,10 @@ pub(crate) fn check(steps: &[Step<'_>], breakpoints: &[Breakpoint]) -> Result<()
     ))
 }
 
-/// How a paused run goes on. As data, `"stepOver"`, `"stepInto"`,
+/// How a paused run goes on. As data, `"step_over"`, `"step_into"`,
 /// `"continue"` or `"stop"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     /// Take this step, with everything it involves — its parts, and the
     /// whole of any function it calls — and pause at the next one.
@@ -127,7 +127,7 @@ pub enum Action {
 
 /// Why a run paused. As data, `"breakpoint"` or `"step"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum Reason {
     /// The step has a breakpoint.
     Breakpoint,
@@ -138,7 +138,7 @@ pub enum Reason {
 /// What a step is: the key that names its node's type, as written in a
 /// program. As data, that key: `"set"`, `"call"`, …
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     /// A literal, or `val`: a constant.
     Val,

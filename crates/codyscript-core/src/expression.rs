@@ -1,7 +1,8 @@
 //! The expression language `{ "x": "…" }` nodes use: numbers, 'text', true,
 //! false, null, variable names, `+ - * /`, parentheses, one comparison
-//! (`== != < <= > >=`), `&& ||` and `!`. Parsed once at compile time by hand
-//! and evaluated against the run's scope by walking the tree.
+//! (`== != < <= > >=`), `&& ||` and `!` (on booleans only), and `??`.
+//! Parsed once at compile time by hand and evaluated against the run's scope
+//! by walking the tree.
 //!
 //! The tree is a flat arena and evaluation uses an explicit stack, so neither
 //! running nor dropping a long chain like `a + a + … + a` recurses: an
@@ -38,6 +39,8 @@ enum Unary {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
+    /// `??`: the left side unless it's `null`, else the right.
+    Default,
     Or,
     And,
     Eq,
@@ -55,6 +58,7 @@ enum Op {
 impl Op {
     fn as_str(self) -> &'static str {
         match self {
+            Op::Default => "??",
             Op::Or => "||",
             Op::And => "&&",
             Op::Eq => "==",
@@ -72,14 +76,15 @@ impl Op {
 }
 
 /// Binary operators by precedence, loosest first.
-const LEVELS: [&[Op]; 5] = [
+const LEVELS: [&[Op]; 6] = [
+    &[Op::Default],
     &[Op::Or],
     &[Op::And],
     &[Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge],
     &[Op::Add, Op::Sub],
     &[Op::Mul, Op::Div],
 ];
-const COMPARISON: usize = 2;
+const COMPARISON: usize = 3;
 
 /// The operator at level `p` spelled `symbol`, if there is one.
 fn level_op(p: usize, symbol: Option<&str>) -> Option<Op> {
@@ -141,7 +146,7 @@ fn token_at(source: &str, start: usize) -> Result<(Token<'_>, usize), String> {
         };
         return Ok((token, end));
     }
-    for op in ["==", "!=", "<=", ">=", "&&", "||"] {
+    for op in ["==", "!=", "<=", ">=", "&&", "||", "??"] {
         if rest.starts_with(op) {
             return Ok((Token::Sym(&rest[..2]), start + 2));
         }
@@ -369,17 +374,6 @@ impl<'v> V<'v> {
         }
     }
 
-    /// Truthiness: `false`, `0`, `NaN`, `""` and `null` are false.
-    fn truthy(self) -> bool {
-        match self {
-            V::Null => false,
-            V::Bool(b) => b,
-            V::Num(n, _) => n != 0.0 && !n.is_nan(),
-            V::Str(s) => !s.is_empty(),
-            V::List(_) | V::Obj(_) => true,
-        }
-    }
-
     /// An array or object: not comparable with `==` or ordering.
     fn is_list(self) -> bool {
         matches!(self, V::List(_) | V::Obj(_))
@@ -430,10 +424,14 @@ enum Task {
     /// The left operand is on the value stack; evaluate the right one.
     Right(Op, usize),
     Apply(Op),
+    /// The right operand of `&&` or `||` is on the value stack, and must be
+    /// a boolean.
+    Boolean(Op),
 }
 
-/// Evaluates `ast`. `&&` and `||` short-circuit and return an operand. Every
-/// node evaluated is one step, counted before its operands.
+/// Evaluates `ast`. `&&`, `||` and `??` short-circuit: their right side is
+/// evaluated only when it decides the result. Every node evaluated is one
+/// step, counted before its operands.
 pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Value, Fault> {
     let mut tasks = Stack::new(Task::Apply(Op::Add)); // (only a filler)
     let mut values = Stack::new(V::Null);
@@ -466,19 +464,26 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
             Task::Unary(op) => {
                 let a = pop(&mut values);
                 values.push(match (op, a) {
-                    (Unary::Not, _) => V::Bool(!a.truthy()),
+                    (Unary::Not, V::Bool(b)) => V::Bool(!b),
                     (Unary::Neg, V::Num(n, _)) => V::Num(-n, None),
-                    (Unary::Neg, _) => {
-                        return Err(Fault::Type(format!(
-                            "\"-\" needs a number, got {}",
-                            a.kind()
-                        )));
-                    }
+                    (Unary::Not, _) => return Err(needs("!", "a boolean", a)),
+                    (Unary::Neg, _) => return Err(needs("-", "a number", a)),
                 });
             }
             Task::Right(op @ (Op::And | Op::Or), c) => {
                 let a = values.last().unwrap_or(V::Null);
-                if (op == Op::And) == a.truthy() {
+                let V::Bool(b) = a else {
+                    return Err(needs(op.as_str(), "booleans", a));
+                };
+                // `false && …` and `true || …` are decided: the left side.
+                if (op == Op::And) == b {
+                    values.pop();
+                    tasks.push(Task::Boolean(op));
+                    next = Some(c);
+                }
+            }
+            Task::Right(Op::Default, c) => {
+                if let Some(V::Null) = values.last() {
                     values.pop();
                     next = Some(c);
                 }
@@ -491,6 +496,12 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
                 let c = pop(&mut values);
                 let a = pop(&mut values);
                 values.push(binary(op, a, c).map_err(Fault::Type)?);
+            }
+            Task::Boolean(op) => {
+                let c = values.last().unwrap_or(V::Null);
+                if !matches!(c, V::Bool(_)) {
+                    return Err(needs(op.as_str(), "booleans", c));
+                }
             }
         }
     }
@@ -598,8 +609,19 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
             Ok(V::Num(result, None))
         }
         // Short-circuited by `evaluate`; never applied.
-        Op::And | Op::Or => Ok(a),
+        Op::Default | Op::And | Op::Or => Ok(a),
     }
+}
+
+/// A type error: operator `op` needs `what`, and got `got`.
+fn needs(op: &str, what: &str, got: V<'_>) -> Fault {
+    Fault::Type(format!("\"{op}\" needs {what}, got {}", got.kind()))
+}
+
+/// What kind of value `value` is, for messages: `null`, `boolean`,
+/// `number`, `string`, `list` or `object`.
+pub(crate) fn kind(value: &Value) -> &'static str {
+    V::of(value).kind()
 }
 
 /// The name of a number that isn't finite, for messages.

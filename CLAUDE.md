@@ -223,10 +223,15 @@ closures already work with `async_executor`.
   literals in expressions included. `Map` keeps insertion order — it
   decides argument order — and compares order-insensitively; reading one
   with a repeated key is an error, in every format (`MapVisitor`).
-- **Expressions stay small**: arithmetic, comparison and logic; no calls,
-  assignment or loops. Strict types (`1 + 'a'` is a `type_error`). Numbers
-  are f64; whole results become integers. Text compares by code point, as
-  Rust's `str` does.
+- **Expressions stay small**: arithmetic, comparison, logic and `??`; no
+  calls, assignment or loops. Strict types (`1 + 'a'` is a `type_error`),
+  strict booleans (no truthiness: `if`/`for` tests, `!`, `&&`, `||` take
+  only booleans). `null` is CodyScript's `None`: unusable except by `==`,
+  `??` (`unwrap_or`) and passing it on. Numbers are f64; whole results
+  become integers. Text compares by code point, as Rust's `str` does.
+- **Names in data are snake_case** (`max_steps`, `"step_over"`,
+  `invalid_program`), in every format and in the JavaScript API's data;
+  only JavaScript identifiers (`onPause`, `runConfigSchema`) are camelCase.
 - **No global state.** Executors belong to an engine.
 - **Errors are `codyscript_core::Error`** with a code, a JSON Pointer path
   and the node's tag. Adding an `ErrorCode` is a public API change —

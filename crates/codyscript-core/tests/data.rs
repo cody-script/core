@@ -231,12 +231,12 @@ fn limits_read_from_configuration_with_defaults() {
                 name: "Limits",
                 len: 1,
             },
-            Token::Str("maxSteps"),
+            Token::Str("max_steps"),
             Token::U64(500),
             Token::StructEnd,
         ],
     );
-    let limits: Limits = from_cbor(&to_cbor(&value!({ "maxDepth": 16 })));
+    let limits: Limits = from_cbor(&to_cbor(&value!({ "max_depth": 16 })));
     assert_eq!(
         limits,
         Limits {

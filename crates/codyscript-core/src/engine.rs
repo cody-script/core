@@ -23,9 +23,9 @@ pub type Variables = Map;
 /// Bounds on what one program may consume.
 ///
 /// Serializable, so limits can live in configuration; as data their fields
-/// are `maxSteps` and `maxDepth`, and a missing one takes its default.
+/// are `max_steps` and `max_depth`, and a missing one takes its default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(default)]
 pub struct Limits {
     /// Nodes evaluated per run (each instruction, input, loop test and
     /// expression operand). Default 100 000.

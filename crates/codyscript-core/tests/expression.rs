@@ -78,27 +78,54 @@ fn comparisons() {
 }
 
 #[test]
-fn and_and_or_return_an_operand() {
-    let vars = value!({ "a": 1, "b": 2, "s": "x", "n": null, "l": [1] });
+fn logic_is_on_booleans() {
+    let vars = value!({ "t": true, "f": false });
     for (source, value) in [
-        ("a && b", value!(2)),
-        ("0 && b", value!(0)),
-        ("a || b", value!(1)),
-        ("n || 'default'", value!("default")),
-        ("!a", value!(false)),
-        ("!n", value!(true)),
-        ("!!s", value!(true)),
-        ("l || 1", value!([1])),
-        ("!l", value!(false)),
+        ("t && f", false),
+        ("t && t", true),
+        ("f || t", true),
+        ("f || f", false),
+        ("!f", true),
+        ("!!t", true),
+        ("1 < 2 && 'a' == 'a'", true),
+    ] {
+        assert_eq!(
+            eval(source, vars.clone()).unwrap(),
+            value!(value),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn a_default_replaces_only_null() {
+    let vars = value!({ "n": null, "z": 0, "e": "", "f": false, "l": [] });
+    for (source, value) in [
+        ("n ?? 5", value!(5)),
+        ("z ?? 5", value!(0)),
+        ("e ?? 'x'", value!("")),
+        ("f ?? true", value!(false)),
+        ("l ?? 1", value!([])),
+        ("n ?? n ?? 'last'", value!("last")),
+        // The loosest operator: `??` applies to the whole comparison.
+        ("n ?? 1 < 2", value!(true)),
+        ("(n ?? 1) + 1", value!(2)),
     ] {
         assert_eq!(eval(source, vars.clone()).unwrap(), value, "{source}");
     }
 }
 
 #[test]
+fn a_default_skips_its_right_side_unless_needed() {
+    // `missing` would be undefined: it's never evaluated.
+    assert_eq!(eval("1 ?? missing", value!({})).unwrap(), value!(1));
+    assert_eq!(run(&Engine::new(), &x("1 ?? 2 + 3")).unwrap().steps, 3);
+}
+
+#[test]
 fn a_number_passed_through_keeps_its_exact_json_form() {
     let big = value!(u64::MAX);
-    assert_eq!(eval("n || 0", value!({ "n": big.clone() })).unwrap(), big);
+    assert_eq!(eval("n ?? 0", value!({ "n": big.clone() })).unwrap(), big);
     assert!(
         eval("n", value!({ "n": 1.0 }))
             .unwrap()
@@ -174,6 +201,10 @@ fn type_errors() {
     for (source, message) in [
         ("1 + 'a'", r#""+" needs numbers, got number and string"#),
         ("-s", r#""-" needs a number, got string"#),
+        ("!s", r#""!" needs a boolean, got string"#),
+        ("n && true", r#""&&" needs booleans, got null"#),
+        ("true && l", r#""&&" needs booleans, got list"#),
+        ("false || 1", r#""||" needs booleans, got number"#),
         (
             "'a' < 1",
             r#""<" needs two numbers or two texts, got string and number"#,

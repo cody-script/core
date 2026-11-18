@@ -127,7 +127,7 @@ fn pauses_steps_and_actions_are_written_as_json() {
     assert!(steps.ends_with(
         r#"{"path":"/fn/twice/do/0","kind":"ret","function":"twice","depth":0},{"path":"/fn/twice/do/0/ret","kind":"x","name":"v * 2","function":"twice","depth":1}]"#
     ));
-    let actions: Vec<Action> = from_str(r#"["stepOver","stepInto","continue","stop"]"#).unwrap();
+    let actions: Vec<Action> = from_str(r#"["step_over","step_into","continue","stop"]"#).unwrap();
     assert_eq!(
         actions,
         [
