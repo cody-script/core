@@ -540,7 +540,7 @@ impl<'p> Node<'p> {
         match self {
             Node::Input(input) => match &input.kind {
                 InputKind::Ref(name) => Some(name),
-                InputKind::X(expression) => Some(&expression.source),
+                InputKind::X(ast) => Some(&ast.source),
                 InputKind::External(external) => Some(&external.name),
                 InputKind::Call(call) => Some(&functions[call.function].name),
                 InputKind::Const(_) | InputKind::Do(_) => None,

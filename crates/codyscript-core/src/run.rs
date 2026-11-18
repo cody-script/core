@@ -26,9 +26,9 @@ use crate::debug::{Frame, Node, Session};
 use crate::engine::{Limits, RunOptions, RunResult, Variables};
 use crate::error::{Cause, Details, Error, ErrorCode};
 use crate::executor::{ExecutorCall, Signal};
-use crate::expression::{self, Fault, Stop};
+use crate::expression::{self, Ast, Fault, Stop};
 use crate::program::{
-    Call, Expression, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
+    Call, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
 };
 use crate::value::{Map, Value};
 
@@ -289,7 +289,7 @@ impl<'p> Machine<'p, '_> {
                     ));
                 }
             },
-            InputKind::X(expression) => self.expression(expression, input.tag.as_deref())?,
+            InputKind::X(ast) => self.expression(ast, input)?,
             InputKind::External(external) => {
                 // Arguments resolve one at a time, in order: the first
                 // pushed last, so it runs first.
@@ -467,22 +467,25 @@ impl<'p> Machine<'p, '_> {
         })
     }
 
-    fn expression(&mut self, expression: &Expression, tag: Option<&str>) -> Result<Value, Error> {
+    /// Evaluates the expression of `input`, an `x` node. Its failures point
+    /// at the node's `/x`.
+    fn expression(&mut self, ast: &Ast, input: &Input) -> Result<Value, Error> {
         let mut cx = ExpressionContext {
             scopes: &self.scopes[self.base..],
             meter: &mut self.meter,
         };
-        expression::evaluate(&expression.ast, &mut cx).map_err(|fault| {
+        expression::evaluate(ast, &mut cx).map_err(|fault| {
+            let (path, tag) = (format!("{}/x", input.path), input.tag.as_deref());
             let (code, message) = match fault {
-                Fault::Stop(stop) => return self.meter.error(stop, &expression.path, tag),
+                Fault::Stop(stop) => return self.meter.error(stop, &path, tag),
                 Fault::Undefined(name) => (
                     ErrorCode::UndefinedVariable,
                     format!("Variable \"{name}\" is not defined"),
                 ),
                 Fault::Type(message) => (ErrorCode::TypeError, message),
             };
-            let message = format!("{message} in \"{}\"", expression.source);
-            failure(code, message, &expression.path, tag, None)
+            let message = format!("{message} in \"{}\"", ast.source);
+            failure(code, message, &path, tag, None)
         })
     }
 

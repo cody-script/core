@@ -137,21 +137,24 @@ third smaller (32-bit pointers):
 | Scenario | Allocations | Allocated | Peak | Retained |
 |---|--:|--:|--:|--:|
 | parse the README rule from JSON | 50 | 4.5 KiB | 4.5 KiB | 4.5 KiB |
-| compile the README rule | 153 | 8.0 KiB | 7.4 KiB | 3.1 KiB |
-| compile a wide program (100 instructions) | 2705 | 184.0 KiB | 139.2 KiB | 67.5 KiB |
-| compile the deepest default program | 589 | 57.4 KiB | 51.2 KiB | 29.9 KiB |
-| run the README rule | 22 | 1.3 KiB | 946 B | 344 B |
-| run the sum loop, n = 1000 | 10 | 1.0 KiB | 837 B | 301 B |
-| run the call loop, n = 1000, sync executor | 5009 | 146.5 KiB | 951 B | 298 B |
-| run the call loop, n = 1000, async executor | 5009 | 216.9 KiB | 1.0 KiB | 298 B |
-| JSON in, run, JSON out (README rule) | 178 | 13.0 KiB | 7.3 KiB | 152 B |
-| JSON in, run, JSON out (README rule, compiled once) | 23 | 1.3 KiB | 919 B | 152 B |
-| Tokio: 64 runs of the call loop (n = 100), one by one | 32512 | 993.4 KiB | 951 B | 0 B |
-| Tokio: 64 runs of the call loop (n = 100), concurrently | 32577 | 1.0 MiB | 64.3 KiB | 0 B |
+| compile the README rule | 43 | 1.9 KiB | 1.6 KiB | 1.5 KiB |
+| compile a wide program (100 instructions) | 1009 | 107.9 KiB | 48.8 KiB | 45.5 KiB |
+| compile the deepest default program | 169 | 31.1 KiB | 30.9 KiB | 23.4 KiB |
+| run the README rule | 22 | 1.4 KiB | 1010 B | 344 B |
+| run the sum loop, n = 1000 | 10 | 1.1 KiB | 901 B | 301 B |
+| run the call loop, n = 1000, sync executor | 5009 | 146.6 KiB | 1015 B | 298 B |
+| run the call loop, n = 1000, async executor | 5009 | 217.0 KiB | 1.1 KiB | 298 B |
+| JSON in, run, JSON out (README rule) | 166 | 12.8 KiB | 6.6 KiB | 152 B |
+| JSON in, run, JSON out (README rule, compiled once) | 23 | 1.4 KiB | 983 B | 152 B |
+| Tokio: 64 runs of the call loop (n = 100), one by one | 32512 | 999.4 KiB | 1015 B | 0 B |
+| Tokio: 64 runs of the call loop (n = 100), concurrently | 32577 | 1.0 MiB | 81.2 KiB | 0 B |
 
 "Retained" is the size of what the scenario returns: a compiled program's
 footprint, or a run's result. The WebAssembly table also reports the
 module's linear memory, which includes the benchmark harness's own buffers.
+The compile scenarios measure compiling alone: their programs are built
+before they start. (Until 0.10 they built them inside, which counted every
+node of the program as compiling's work.)
 
 ### What they show
 
@@ -163,16 +166,22 @@ module's linear memory, which includes the benchmark harness's own buffers.
   call makes 5 — its input map, the argument names and operation it's
   given, and its boxed future — which is what's left in a run.
 - **Compile once.** Parsing and compiling the README rule costs about five
-  times what running it does: a JSON host pays 15 µs and 178 allocations a
+  times what running it does: a JSON host pays 15 µs and 166 allocations a
   row if it compiles the rule each time, 2.6 µs and 23 if it compiles it
   once. Parsing itself is mostly building the value tree (serde_json reads
   the rule's text in well under 1 µs), so a faster parser or a binary
   format would save little.
-- **A compiled program costs about 0.7 KiB per instruction** (68 KiB for
-  100 instructions with an expression each). About 30% of that is the copy
-  of the source value kept for `CompiledProgram::program()`; the rest is the
-  program tree and each expression's parsed form. (The JSON Pointer paths
-  kept for error messages are a small part, about 3.5 KiB.)
+- **A compiled program costs about 0.45 KiB per instruction** (45 KiB for
+  100 instructions with an expression each): the program tree and each
+  expression's parsed form. (The JSON Pointer paths kept for error messages
+  are a small part, about 3.5 KiB.) Until 0.10 it also kept a copy of the
+  source, about 30% more.
+- **0.10 compiles 30–35% faster** than the speed table above shows, with
+  less than half the allocations (43 against 98 for the README rule,
+  measuring compiling alone): it no longer copies the program, and builds a
+  node's error paths only when there's an error to report. Measured A/B
+  against 0.9 on an Apple M4 Pro, alternating builds to cancel out a busy
+  machine; running is unchanged.
 - **WebAssembly in Node runs at 1.1–1.8× native time**, close to native for
   large compiles.
 - **Async costs little natively.** A yielding executor adds about 0.2 µs per

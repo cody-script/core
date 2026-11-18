@@ -256,13 +256,11 @@ Engine::builder()
 engine.has_function("text.trim") -> bool
 
 engine.compile(&program) -> Result<CompiledProgram, Error>
-engine.compile_owned(program) -> Result<CompiledProgram, Error>  // keeps it, no copy
 engine.run(&program, options).await -> Result<RunResult, Error>   // compile + run once
 engine.run_blocking(&program, options) -> Result<RunResult, Error>
 compiled.run(options).await / compiled.run_blocking(options)
 compiled.steps() -> Vec<debug::Step>                       // what breakpoints name
 compiled.check(&run_config) -> Result<(), Error>           // its breakpoints name steps?
-compiled.program() -> &Value
 
 RunOptions::new().with_variables(map).with_signal(signal)  // or RunOptions::from(map)
     .with_debugger(breakpoints, debugger)                   // to debug the run
@@ -304,9 +302,9 @@ RunResult { value: Value, variables: Map, steps: u64 }
   `InvalidConfig`, every `issues()` found. An
   executor that returns a boxed `codyscript_core::Error` fails the run with
   exactly that error.
-- **Isolation** — `compile` copies the program, so later changes to the
-  source value can't reach a compiled program. `compile_owned` takes the
-  program instead of copying it, for one that was just parsed or built.
+- **Isolation** — a compiled program keeps nothing of the value it was
+  compiled from: later changes to that value can't reach it, and the value
+  can be dropped as soon as `compile` returns.
 - **Compile once** — compiling is most of the cost of a short run (parsing
   and compiling a small rule takes several times as long as running it), so
   compile a program once and keep the `CompiledProgram` for every run.
@@ -493,6 +491,20 @@ Debugging changes none of this: a debugged run has the same limits, and a
 CodyScript began as a port of the TypeScript package `@cody-script/core`;
 since 0.9 it no longer follows it (see below), and earlier notes mention it
 for history only.
+
+### 0.9 → 0.10 (faster compiling; two methods removed)
+
+The program format, behaviour, messages and error codes are unchanged.
+Compiling is 30–35% faster and allocates less than half as much, and a
+compiled program takes 20–50% less memory, because it no longer keeps a
+copy of the program it was compiled from. That copy is gone from
+the API:
+
+- **`CompiledProgram::program()` is removed.** Keep the program yourself if
+  you need it after compiling.
+- **`Engine::compile_owned(program)` is removed**: it existed only to skip
+  the copy. Use `engine.compile(&program)`, which no longer copies.
+- `CompiledProgram`'s `Debug` shows its compiled tree.
 
 ### 0.8 → 0.9 (its own semantics, not JavaScript's)
 

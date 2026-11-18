@@ -43,8 +43,8 @@ it. The core never changes for a new format.
 
 ```toml
 [dependencies]
-codyscript-core = "0.9"
-codyscript-json = "0.9"   # if your programs are stored as JSON
+codyscript-core = "0.10"
+codyscript-json = "0.10"  # if your programs are stored as JSON
 ```
 
 The crates need Rust 1.99 or newer (edition 2024).

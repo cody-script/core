@@ -303,6 +303,9 @@ pub fn memory_scenarios() -> Vec<MemoryScenario> {
     let rule_json = readme_rule_json();
     let readme_json = engine.compile_json(&rule_json).expect("the rule compiles");
     let (e1, e2, e3) = (engine.clone(), engine.clone(), engine.clone());
+    // Built here, not in the scenarios: compiling borrows a program, and
+    // building one isn't the work being measured.
+    let (rule, wide, deep) = (readme_rule(), wide_program(100), deep_program());
     vec![
         (
             "parse the README rule from JSON",
@@ -310,15 +313,15 @@ pub fn memory_scenarios() -> Vec<MemoryScenario> {
         ),
         (
             "compile the README rule",
-            Box::new(move || keep(compile(&e1, &readme_rule()))),
+            Box::new(move || keep(compile(&e1, &rule))),
         ),
         (
             "compile a wide program (100 instructions)",
-            Box::new(move || keep(compile(&e2, &wide_program(100)))),
+            Box::new(move || keep(compile(&e2, &wide))),
         ),
         (
             "compile the deepest default program",
-            Box::new(move || keep(compile(&e3, &deep_program()))),
+            Box::new(move || keep(compile(&e3, &deep))),
         ),
         (
             "run the README rule",

@@ -220,23 +220,17 @@ impl Engine {
 
     /// Validates `program` (shape, depth, functions, expression syntax, and
     /// that the engine provides every external function it declares) once,
-    /// and copies it: later changes to `program` can't reach the result.
-    /// [`compile_owned`](Engine::compile_owned) skips the copy.
+    /// and builds what runs it. The result keeps nothing of `program`, which
+    /// may change or go once this returns.
     pub fn compile(&self, program: &Value) -> Result<CompiledProgram, Error> {
-        let root = self.tree(program)?;
-        Ok(self.inner.compiled(program.clone(), root))
+        Ok(CompiledProgram {
+            engine: Arc::clone(&self.inner),
+            root: self.tree(program)?,
+        })
     }
 
-    /// [`compile`](Engine::compile), keeping `program` itself rather than a
-    /// copy: cheaper when the caller has no further use for it, as with a
-    /// program just parsed from text.
-    pub fn compile_owned(&self, program: Value) -> Result<CompiledProgram, Error> {
-        let root = self.tree(&program)?;
-        Ok(self.inner.compiled(program, root))
-    }
-
-    /// Compiles and runs `program` once, without keeping a copy of it. To run
-    /// a program more than once, [`compile`](Engine::compile) it once instead.
+    /// Compiles and runs `program` once. To run a program more than once,
+    /// [`compile`](Engine::compile) it once instead.
     pub async fn run(&self, program: &Value, options: RunOptions<'_>) -> Result<RunResult, Error> {
         let root = self.tree(program)?;
         run::run(&root, self.inner.limits, options).await
@@ -254,16 +248,6 @@ impl Engine {
     /// Validates `program`, building the tree the engine runs.
     fn tree(&self, program: &Value) -> Result<Program, Error> {
         validate(program, self.inner.limits.max_depth, &self.inner.executors)
-    }
-}
-
-impl Inner {
-    fn compiled(self: &Arc<Self>, program: Value, root: Program) -> CompiledProgram {
-        CompiledProgram {
-            engine: Arc::clone(self),
-            program,
-            root,
-        }
     }
 }
 
@@ -382,17 +366,10 @@ impl fmt::Debug for EngineBuilder {
 #[derive(Clone)]
 pub struct CompiledProgram {
     engine: Arc<Inner>,
-    program: Value,
     root: Program,
 }
 
 impl CompiledProgram {
-    /// The program, as compiled (a copy of what was given to `compile`, or
-    /// what was given to `compile_owned`).
-    pub fn program(&self) -> &Value {
-        &self.program
-    }
-
     /// Runs the program — under a debugger, if `options` has one (see
     /// [`RunOptions::with_debugger`]).
     pub async fn run(&self, options: RunOptions<'_>) -> Result<RunResult, Error> {
@@ -425,7 +402,7 @@ impl CompiledProgram {
 impl fmt::Debug for CompiledProgram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CompiledProgram")
-            .field("program", &self.program)
+            .field("tree", &self.root)
             .finish()
     }
 }

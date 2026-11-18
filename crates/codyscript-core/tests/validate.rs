@@ -9,7 +9,7 @@ fn accepts_every_valid_program() {
     let engine = engine();
     for (name, program) in valid() {
         match engine.compile(&program) {
-            Ok(compiled) => assert_eq!(compiled.program(), &program, "{name}"),
+            Ok(_) => {}
             Err(error) => panic!("refused {name}: {error}"),
         }
     }
@@ -343,7 +343,8 @@ fn changing_the_source_after_compile_doesnt_change_the_program() {
     let compiled = engine().compile(&source).unwrap();
     source["do"][0]["ret"]["val"] = value!("smuggled");
     assert_eq!(compiled_value(&compiled, RunOptions::new()), value!(1));
-    assert_eq!(compiled.program(), &m(vec![ret(val(value!(1)))]));
+    drop(source);
+    assert_eq!(compiled_value(&compiled, RunOptions::new()), value!(1));
 }
 
 #[test]
@@ -418,13 +419,16 @@ fn a_call_of_an_unknown_function_still_checks_its_arguments_and_arg() {
 }
 
 #[test]
-fn compiled_program_debug_shows_the_program() {
-    let compiled = engine().compile(&value!(1)).unwrap();
-    assert_eq!(
-        format!("{compiled:?}"),
-        "CompiledProgram { program: Number(1) }"
+fn compiled_program_debug_shows_its_tree() {
+    let compiled = engine()
+        .compile(&value!({ "ref": "a", "tag": "t" }))
+        .unwrap();
+    let debug = format!("{compiled:?}");
+    assert!(
+        debug.starts_with("CompiledProgram { tree: Program { body: Input {"),
+        "{debug}"
     );
-    let _: Value = compiled.program().clone();
+    assert!(debug.contains(r#"kind: Ref("a")"#), "{debug}");
 }
 
 #[test]

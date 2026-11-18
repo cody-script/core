@@ -42,7 +42,7 @@ pub(crate) enum InputKind {
     /// `ref`: a variable.
     Ref(String),
     /// `x`: an expression.
-    X(Expression),
+    X(Arc<Ast>),
     /// `call` of an external function: the host's executor runs it. Boxed,
     /// as the largest kind by far, so every other input stays small.
     External(Box<External>),
@@ -50,14 +50,6 @@ pub(crate) enum InputKind {
     Call(Call),
     /// `do`: a block with its own scope.
     Do(Vec<Instruction>),
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Expression {
-    pub source: Arc<str>,
-    pub ast: Arc<Ast>,
-    /// Where failures point: the node's `/x`.
-    pub path: String,
 }
 
 #[derive(Clone)]

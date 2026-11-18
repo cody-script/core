@@ -9,12 +9,15 @@
 //! untrusted expression can't overflow the host's stack.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use crate::value::{Number, Value};
 
-/// A parsed expression.
+/// A parsed expression, with its source.
 #[derive(Clone, Debug)]
 pub(crate) struct Ast {
+    /// The expression as written.
+    pub source: Arc<str>,
     nodes: Vec<Node>,
     root: usize,
 }
@@ -25,8 +28,8 @@ enum Node {
     Lit(Value),
     /// A number literal.
     Num(f64),
-    /// A variable.
-    Name(String),
+    /// A variable. (Its own copy of the name: reading it is the hot path.)
+    Name(Box<str>),
     Unary(Unary, usize),
     Binary(Op, usize, usize),
 }
@@ -258,19 +261,21 @@ impl<'s> Parser<'s> {
             Token::Sym(s) => Token::Sym(s),
         });
         self.i += 1;
+        let Some(token) = token else {
+            return Err("Expression ends too early".into());
+        };
         let ast = match token {
-            None => return Err("Expression ends too early".into()),
-            Some(Token::Num(n)) => self.push(Node::Num(n)),
-            Some(Token::Lit(v)) => self.push(Node::Lit(v)),
-            Some(Token::Sym("!")) => {
+            Token::Num(n) => self.push(Node::Num(n)),
+            Token::Lit(v) => self.push(Node::Lit(v)),
+            Token::Sym("!") => {
                 let a = self.unary()?;
                 self.push(Node::Unary(Unary::Not, a))
             }
-            Some(Token::Sym("-")) => {
+            Token::Sym("-") => {
                 let a = self.unary()?;
                 self.push(Node::Unary(Unary::Neg, a))
             }
-            Some(Token::Sym("(")) => {
+            Token::Sym("(") => {
                 let ast = self.level(0)?;
                 if self.peek() != Some(")") {
                     return Err("Missing \")\"".into());
@@ -278,10 +283,10 @@ impl<'s> Parser<'s> {
                 self.i += 1;
                 ast
             }
-            Some(Token::Sym(s)) if s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') => {
-                self.push(Node::Name(s.to_owned()))
+            Token::Sym(s) if s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') => {
+                self.push(Node::Name(s.into()))
             }
-            Some(Token::Sym(s)) => return Err(format!("Unexpected \"{s}\"")),
+            Token::Sym(s) => return Err(format!("Unexpected \"{s}\"")),
         };
         self.depth -= 1;
         Ok(ast)
@@ -305,6 +310,7 @@ pub(crate) fn parse(source: &str, max_depth: usize) -> Result<Ast, String> {
         return Err(format!("Unexpected \"{text}\""));
     }
     Ok(Ast {
+        source: source.into(),
         nodes: parser.nodes,
         root,
     })
@@ -446,7 +452,7 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
                 Node::Num(n) => values.push(V::Num(*n, None)),
                 Node::Name(name) => match cx.get(name) {
                     Some(v) => values.push(V::of(v)),
-                    None => return Err(Fault::Undefined(name.clone())),
+                    None => return Err(Fault::Undefined(name.to_string())),
                 },
                 Node::Unary(op, a) => {
                     tasks.push(Task::Unary(*op));

@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.99"
 authors = ["Cody Pope"]
@@ -18,8 +18,8 @@ homepage = "https://github.com/cody-script/core#readme"
 repository = "https://github.com/cody-script/core"
 
 [workspace.dependencies]
-codyscript-core = { path = "crates/codyscript-core", version = "0.9.0" }
-codyscript-json = { path = "crates/codyscript-json", version = "0.9.0" }
+codyscript-core = { path = "crates/codyscript-core", version = "0.10.0" }
+codyscript-json = { path = "crates/codyscript-json", version = "0.10.0" }
 codyscript-wasm = { path = "crates/codyscript-wasm" }
 serde = { version = "1", features = ["derive"] }
 # Pinned together: the generated JavaScript glue must come from exactly the
