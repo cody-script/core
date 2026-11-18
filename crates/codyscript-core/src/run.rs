@@ -4,22 +4,29 @@
 //! produced, block results, scopes — driven by one loop. Nothing recurses, so
 //! the stack a run uses doesn't grow with the program's depth, nor with how
 //! deeply its functions call each other: neither can overflow it, natively or
-//! under WebAssembly's small stack. The loop's only `.await` is an executor
-//! call.
+//! under WebAssembly's small stack. The loop's only `.await`s are an executor
+//! call and, in a debugged run, a pause.
 //!
 //! Every step is counted at the moment the recursive definition (the
 //! TypeScript engine) counts it, and in the same order: an instruction or
 //! input is a step when it starts, before its parts.
 //!
+//! Work that would be pushed and popped straight away is done at once
+//! instead: a list runs its first instruction, and an instruction resolves
+//! its input. Only those two calls are direct (resolving an input never runs
+//! instructions itself; a block's are pushed as a task), so the native stack
+//! stays the same depth however the program nests.
+//!
 //! A debugged run may pause before each step to ask its debugger how to go
 //! on. The loop is built twice, with and without that check, so a run that
-//! isn't debugged doesn't pay for it.
+//! isn't debugged doesn't pay for it. A debugged run does nothing at once:
+//! every step is a task of its own, so it can pause before any of them.
 
 use crate::debug::{Frame, Node, Session};
-use crate::engine::{Executors, Limits, RunOptions, RunResult, Variables};
+use crate::engine::{Limits, RunOptions, RunResult, Variables};
 use crate::error::{Cause, Details, Error, ErrorCode};
 use crate::executor::{ExecutorCall, Signal};
-use crate::expression::{self, Fault};
+use crate::expression::{self, Fault, Stop};
 use crate::program::{
     Call, Expression, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
 };
@@ -29,18 +36,18 @@ use crate::value::{Map, Value};
 /// where it says.
 pub(crate) async fn run<'p>(
     program: &'p Program,
-    executors: &Executors,
     limits: Limits,
     options: RunOptions,
     debug: Option<Session<'p, '_>>,
 ) -> Result<RunResult, Error> {
     let mut machine = Machine {
-        executors,
         functions: &program.functions,
-        max_steps: limits.max_steps,
+        meter: Meter {
+            steps: 0,
+            max_steps: limits.max_steps,
+            signal: options.signal,
+        },
         max_depth: limits.max_depth,
-        signal: options.signal,
-        steps: 0,
         scopes: vec![options.variables],
         base: 0,
         invocations: Vec::new(),
@@ -60,7 +67,7 @@ pub(crate) async fn run<'p>(
     Ok(RunResult {
         value: machine.values.pop().unwrap_or_default(),
         variables: machine.scopes.swap_remove(0),
-        steps: machine.steps,
+        steps: machine.meter.steps,
     })
 }
 
@@ -70,7 +77,8 @@ enum Task<'p> {
     Resolve(&'p Input),
     /// Run these instructions in order, in the current block.
     List(&'p [Instruction]),
-    /// Run this instruction.
+    /// Run this instruction. Only a debugged run has these: other runs
+    /// execute an instruction at once.
     Execute(&'p Instruction),
     /// Call the external function with the arguments on the value stack.
     Call(&'p External, &'p Input),
@@ -142,15 +150,12 @@ fn frames<'a>(scopes: &'a [Variables], invocations: &'a [Invocation<'_>]) -> Vec
 }
 
 /// One run's state.
-struct Machine<'p, 'e, 'd> {
-    executors: &'e Executors,
+struct Machine<'p, 'd> {
     /// The program's functions, by index.
     functions: &'p [Function],
-    max_steps: u64,
+    meter: Meter,
     /// How deeply calls may nest.
     max_depth: usize,
-    signal: Option<Signal>,
-    steps: u64,
     /// Variables: a block pushes its own scope, reads fall through to the
     /// enclosing ones, and `set` writes the innermost.
     scopes: Vec<Variables>,
@@ -167,7 +172,7 @@ struct Machine<'p, 'e, 'd> {
     debug: Option<Session<'p, 'd>>,
 }
 
-impl<'p> Machine<'p, '_, '_> {
+impl<'p> Machine<'p, '_> {
     /// Does every task. `DEBUGGED` (whether `debug` is set) builds the loop
     /// twice, so that only a debugged run has the chance to pause.
     async fn drive<const DEBUGGED: bool>(&mut self) -> Result<(), Error> {
@@ -178,7 +183,7 @@ impl<'p> Machine<'p, '_, '_> {
             } else if DEBUGGED {
                 self.debug_task(task).await?;
             } else {
-                self.perform(task)?;
+                self.perform::<false>(task)?;
             }
         }
         Ok(())
@@ -192,41 +197,44 @@ impl<'p> Machine<'p, '_, '_> {
         {
             let frames = || frames(&self.scopes, &self.invocations);
             let depth = self.invocations.len();
-            session.before(step, depth, self.steps, frames).await?;
+            session
+                .before(step, depth, self.meter.steps, frames)
+                .await?;
         }
-        self.perform(task)
+        self.perform::<true>(task)
     }
 
-    /// Does one task that needs no waiting.
-    fn perform(&mut self, task: Task<'p>) -> Result<(), Error> {
+    /// Does one task that needs no waiting. In a debugged run (`DEBUGGED`),
+    /// it pushes the steps it would otherwise take at once.
+    fn perform<const DEBUGGED: bool>(&mut self, task: Task<'p>) -> Result<(), Error> {
         match task {
             Task::Resolve(input) => self.resolve(input)?,
-            Task::List(list) => {
-                if let Some((first, rest)) = list.split_first() {
-                    if !rest.is_empty() {
-                        self.tasks.push(Task::List(rest));
-                    }
-                    self.tasks.push(Task::Execute(first));
-                }
-            }
-            Task::Execute(ins) => self.execute(ins)?,
+            Task::List(list) => self.list::<DEBUGGED>(list)?,
+            Task::Execute(ins) => self.execute::<DEBUGGED>(ins)?,
             Task::Assign(name) => {
                 let value = self.pop();
-                self.scope().insert(name.to_owned(), value);
+                // Reassigning, the usual case in a loop, needs no new name.
+                let scope = self.scope();
+                match scope.get_mut(name) {
+                    Some(slot) => *slot = value,
+                    None => {
+                        scope.insert(name.to_owned(), value);
+                    }
+                }
             }
             Task::Return => self.ret(),
             Task::Branch { then, otherwise } => {
                 if truthy(&self.pop()) {
-                    self.tasks.push(Task::List(then));
+                    self.list::<DEBUGGED>(then)?;
                 } else if let Some(otherwise) = otherwise {
-                    self.tasks.push(Task::List(otherwise));
+                    self.list::<DEBUGGED>(otherwise)?;
                 }
             }
             Task::Loop { test, body } => {
                 if truthy(&self.pop()) {
                     self.tasks.push(Task::Loop { test, body });
                     self.tasks.push(Task::Resolve(test));
-                    self.tasks.push(Task::List(body));
+                    self.list::<DEBUGGED>(body)?;
                 }
             }
             Task::EndBlock { scoped } => {
@@ -292,16 +300,34 @@ impl<'p> Machine<'p, '_, '_> {
         Ok(())
     }
 
-    fn execute(&mut self, ins: &'p Instruction) -> Result<(), Error> {
+    /// Runs `list`'s first instruction now (in a debugged run, next), and
+    /// the rest after it.
+    fn list<const DEBUGGED: bool>(&mut self, list: &'p [Instruction]) -> Result<(), Error> {
+        let Some((first, rest)) = list.split_first() else {
+            return Ok(());
+        };
+        if !rest.is_empty() {
+            self.tasks.push(Task::List(rest));
+        }
+        if DEBUGGED {
+            self.tasks.push(Task::Execute(first));
+            return Ok(());
+        }
+        self.execute::<false>(first)
+    }
+
+    /// Runs an instruction: resolves its input now (in a debugged run,
+    /// next), and pushes what to do with the value.
+    fn execute<const DEBUGGED: bool>(&mut self, ins: &'p Instruction) -> Result<(), Error> {
         self.step(&ins.path, ins.tag.as_deref())?;
-        match &ins.kind {
+        let input = match &ins.kind {
             InstructionKind::Set { name, to } => {
                 self.tasks.push(Task::Assign(name));
-                self.tasks.push(Task::Resolve(to));
+                to
             }
             InstructionKind::Ret(input) => {
                 self.tasks.push(Task::Return);
-                self.tasks.push(Task::Resolve(input));
+                input
             }
             InstructionKind::If {
                 test,
@@ -312,14 +338,18 @@ impl<'p> Machine<'p, '_, '_> {
                     then,
                     otherwise: otherwise.as_deref(),
                 });
-                self.tasks.push(Task::Resolve(test));
+                test
             }
             InstructionKind::For { test, body } => {
                 self.tasks.push(Task::Loop { test, body });
-                self.tasks.push(Task::Resolve(test));
+                test
             }
+        };
+        if DEBUGGED {
+            self.tasks.push(Task::Resolve(input));
+            return Ok(());
         }
-        Ok(())
+        self.resolve(input)
     }
 
     /// Starts a function's body — or the program's — in the current scope.
@@ -347,14 +377,7 @@ impl<'p> Machine<'p, '_, '_> {
                 None,
             ));
         }
-        let at = self.values.len().saturating_sub(call.args.len());
-        let values = self.values.split_off(at);
-        let variables: Variables = call
-            .args
-            .iter()
-            .map(|(name, _)| name.clone())
-            .zip(values)
-            .collect();
+        let variables = self.arguments(&call.args);
         let function = &self.functions[call.function];
         self.tasks.push(Task::EndCall);
         self.base = self.scopes.len();
@@ -394,30 +417,25 @@ impl<'p> Machine<'p, '_, '_> {
         {}
     }
 
+    /// The arguments on the value stack, by name, taken off it.
+    fn arguments(&mut self, args: &[(String, Input)]) -> Map {
+        let at = self.values.len().saturating_sub(args.len());
+        let mut map = Map::with_capacity(args.len());
+        let names = args.iter().map(|(name, _)| name.clone());
+        map.extend(names.zip(self.values.drain(at..)));
+        map
+    }
+
     async fn call(&mut self, external: &External, node: &Input) -> Result<Value, Error> {
         let tag = node.tag.as_deref();
-        let at = self.values.len().saturating_sub(external.args.len());
-        let values = self.values.split_off(at);
-        let input: Map = external
-            .args
-            .iter()
-            .map(|(name, _)| name.clone())
-            .zip(values)
-            .collect();
-        let name = &external.name;
-        // Checked by validate() against this engine's own executors.
-        let Some(registered) = self.executors.get(external.exe()) else {
-            let message = format!("Unknown function \"{name}\"");
-            let code = ErrorCode::UnknownFunction;
-            return Err(failure(code, message, &node.path, tag, None));
-        };
         let call = ExecutorCall {
             op: external.op().to_owned(),
             arg: external.arg.clone(),
-            input,
-            signal: self.signal.clone(),
+            input: self.arguments(&external.args),
+            signal: self.meter.signal.clone(),
         };
-        registered.executor.call(call).await.map_err(|error| {
+        let name = &external.name;
+        external.executor.call(call).await.map_err(|error| {
             match error.downcast::<Error>() {
                 // An executor's own engine error passes through unchanged.
                 Ok(own) => *own,
@@ -433,15 +451,11 @@ impl<'p> Machine<'p, '_, '_> {
     fn expression(&mut self, expression: &Expression, tag: Option<&str>) -> Result<Value, Error> {
         let mut cx = ExpressionContext {
             scopes: &self.scopes[self.base..],
-            steps: &mut self.steps,
-            max_steps: self.max_steps,
-            signal: self.signal.as_ref(),
-            path: &expression.path,
-            tag,
+            meter: &mut self.meter,
         };
         expression::evaluate(&expression.ast, &mut cx).map_err(|fault| {
             let (code, message) = match fault {
-                Fault::Stop(error) => return error,
+                Fault::Stop(stop) => return self.meter.error(stop, &expression.path, tag),
                 Fault::Undefined(name) => (
                     ErrorCode::UndefinedVariable,
                     format!("Variable \"{name}\" is not defined"),
@@ -454,13 +468,9 @@ impl<'p> Machine<'p, '_, '_> {
     }
 
     fn step(&mut self, path: &str, tag: Option<&str>) -> Result<(), Error> {
-        step(
-            &mut self.steps,
-            self.max_steps,
-            self.signal.as_ref(),
-            path,
-            tag,
-        )
+        self.meter
+            .step()
+            .map_err(|stop| self.meter.error(stop, path, tag))
     }
 
     /// A variable the running function can see.
@@ -486,13 +496,9 @@ fn lookup<'v>(scopes: &'v [Variables], name: &str) -> Option<&'v Value> {
 }
 
 /// What an expression reads and counts while it's evaluated.
-struct ExpressionContext<'v, 's> {
+struct ExpressionContext<'v, 'm> {
     scopes: &'v [Variables],
-    steps: &'s mut u64,
-    max_steps: u64,
-    signal: Option<&'s Signal>,
-    path: &'s str,
-    tag: Option<&'s str>,
+    meter: &'m mut Meter,
 }
 
 impl<'v> expression::Context<'v> for ExpressionContext<'v, '_> {
@@ -501,35 +507,48 @@ impl<'v> expression::Context<'v> for ExpressionContext<'v, '_> {
         lookup(self.scopes, name)
     }
 
-    fn step(&mut self) -> Result<(), Error> {
-        step(self.steps, self.max_steps, self.signal, self.path, self.tag)
+    #[inline]
+    fn step(&mut self) -> Result<(), Stop> {
+        self.meter.step()
     }
 }
 
-/// Counts one step, failing once the signal is aborted or past `max_steps`.
-fn step(
-    steps: &mut u64,
+/// A run's steps: how many it has taken, how many it may, and the signal
+/// that stops it.
+struct Meter {
+    steps: u64,
     max_steps: u64,
-    signal: Option<&Signal>,
-    path: &str,
-    tag: Option<&str>,
-) -> Result<(), Error> {
-    if let Some(signal) = signal.filter(|s| s.is_aborted()) {
-        let reason = signal.reason();
-        return Err(failure(
-            ErrorCode::Aborted,
-            "Run aborted",
-            path,
-            tag,
-            reason,
-        ));
+    signal: Option<Signal>,
+}
+
+impl Meter {
+    /// Counts one step, unless the run is aborted or out of steps.
+    #[inline]
+    fn step(&mut self) -> Result<(), Stop> {
+        if self.signal.as_ref().is_some_and(Signal::is_aborted) {
+            return Err(Stop::Aborted);
+        }
+        if self.steps >= self.max_steps {
+            return Err(Stop::StepLimit);
+        }
+        self.steps += 1;
+        Ok(())
     }
-    *steps = steps.saturating_add(1);
-    if *steps > max_steps {
-        let message = format!("Program exceeded {max_steps} steps");
-        return Err(failure(ErrorCode::StepLimit, message, path, tag, None));
+
+    /// The error for a step refused at `path`.
+    #[cold]
+    fn error(&self, stop: Stop, path: &str, tag: Option<&str>) -> Error {
+        match stop {
+            Stop::Aborted => {
+                let reason = self.signal.as_ref().and_then(Signal::reason);
+                failure(ErrorCode::Aborted, "Run aborted", path, tag, reason)
+            }
+            Stop::StepLimit => {
+                let message = format!("Program exceeded {} steps", self.max_steps);
+                failure(ErrorCode::StepLimit, message, path, tag, None)
+            }
+        }
     }
-    Ok(())
 }
 
 fn failure(

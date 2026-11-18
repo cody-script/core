@@ -2,14 +2,20 @@
 //! external functions written in JavaScript.
 //!
 //! ```js
-//! import init, { run } from "./pkg/codyscript_wasm.js";
+//! import init, { compile, run, debug } from "./pkg/codyscript_wasm.js";
 //! await init();
 //! const executors = {
 //!   text: { trim: ({ input }) => String(input.value ?? "").trim() },
 //!   slow: { echo: async ({ arg }) => { await new Promise((r) => setTimeout(r, 10)); return arg; } },
 //! };
-//! const outcome = JSON.parse(await run(programJson, '{"Name":" Ada "}', executors, '{"maxSteps":1000}'));
+//! // Once: compile (throws a CodyScriptError if the program is invalid)…
+//! const program = compile(programJson, executors, '{"maxSteps":1000}');
+//! // …then run as often as needed.
+//! const outcome = JSON.parse(await program.run('{"Name":" Ada "}'));
 //! // { ok: true, value, variables, steps }  or  { ok: false, error: { code, message, path, tag?, issues? } }
+//!
+//! // Or compile and run in one go, for a program run only once:
+//! const once = JSON.parse(await run(programJson, '{"Name":" Ada "}', executors, ""));
 //!
 //! // Debugging, with a run configuration: pause at the step tagged "fee",
 //! // then step over to the end.
@@ -20,6 +26,8 @@
 //! Values cross the boundary as JSON text, so this exercises the whole stack
 //! a host would use: `codyscript-json` parsing and printing, the core engine,
 //! and async executors backed by JavaScript promises.
+
+use std::rc::Rc;
 
 use codyscript_core::debug::{Action, Breakpoint, Debugger, Pause, Step};
 use codyscript_core::{
@@ -33,7 +41,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
 /// Shows Rust panics in the browser console instead of `unreachable`.
 #[wasm_bindgen(start)]
@@ -53,7 +61,53 @@ pub fn schema() -> String {
     codyscript_json::SCHEMA.into()
 }
 
-/// Compiles and runs a program.
+/// Compiles a program once, to run any number of times with `program.run`:
+/// for a program that runs more than once, this saves parsing and compiling
+/// it again each time, which costs several times what a short run does.
+///
+/// - `program`: JSON text.
+/// - `executors` and `limits`: as for `run`.
+///
+/// Throws a `CodyScriptError` (an `Error` with `code`, `path`, and `tag` and
+/// `issues` when there are any) if the program is invalid or isn't JSON, and
+/// an `Error` if the arguments themselves are wrong: limits that aren't
+/// JSON, an executor that isn't an object, or a function that isn't one.
+#[wasm_bindgen]
+pub fn compile(program: &str, executors: JsValue, limits: &str) -> Result<Program, JsValue> {
+    match compile_program(program, &executors, limits)? {
+        Ok(compiled) => Ok(Program {
+            compiled: Rc::new(compiled),
+        }),
+        Err(error) => Err(thrown(&error)),
+    }
+}
+
+/// A compiled program, with its executors and limits: made by
+/// `compile`. Runs don't share state, and may overlap.
+#[wasm_bindgen]
+pub struct Program {
+    /// Shared with the runs in flight, so freeing the program can't end them.
+    compiled: Rc<CompiledProgram>,
+}
+
+#[wasm_bindgen]
+impl Program {
+    /// Runs the program with `variables` (JSON text of an object, or `""`
+    /// for none). Resolves and rejects as the top-level `run` does.
+    #[wasm_bindgen(unchecked_return_type = "Promise<string>")]
+    pub fn run(&self, variables: String) -> Promise {
+        let compiled = Rc::clone(&self.compiled);
+        future_to_promise(async move {
+            let variables: Variables = parse_or_default(&variables, "variables")?;
+            let outcome = compiled.run(RunOptions::from(variables)).await;
+            let json = outcome_json(&outcome).map_err(|e| JsError::new(&e.to_string()))?;
+            Ok(json.into())
+        })
+    }
+}
+
+/// Compiles and runs a program: for one that runs once. To run a program
+/// more than once, `compile` it once instead.
 ///
 /// - `program`: JSON text.
 /// - `variables`: JSON text of an object, or `""` for none.
@@ -78,7 +132,7 @@ pub async fn run(
     limits: String,
 ) -> Result<String, JsError> {
     let variables: Variables = parse_or_default(&variables, "variables")?;
-    let compiled = compile(&program, &executors, &limits)?;
+    let compiled = compile_program(&program, &executors, &limits)?;
     let outcome = match compiled {
         Ok(compiled) => compiled.run(RunOptions::from(variables)).await,
         Err(error) => Err(error),
@@ -100,7 +154,7 @@ pub fn steps(program: String, executors: JsValue, limits: String) -> Result<Stri
         ok: bool,
         steps: Vec<Step<'a>>,
     }
-    let json = match compile(&program, &executors, &limits)? {
+    let json = match compile_program(&program, &executors, &limits)? {
         Ok(compiled) => codyscript_json::to_string(&Listed {
             ok: true,
             steps: compiled.steps(),
@@ -148,7 +202,7 @@ pub async fn debug(
         on_pause: SendWrapper::new(on_pause),
         failure: None,
     };
-    let outcome = match compile(&program, &executors, &limits)? {
+    let outcome = match compile_program(&program, &executors, &limits)? {
         Ok(compiled) => {
             let options = RunOptions::from(variables);
             compiled.debug(options, breakpoints, &mut debugger).await
@@ -181,7 +235,7 @@ pub fn check(
         ok: bool,
     }
     let config: RunConfig = parse_or_default(&config, "config")?;
-    let checked = compile(&program, &executors, &limits)?.and_then(|c| c.check(&config));
+    let checked = compile_program(&program, &executors, &limits)?.and_then(|c| c.check(&config));
     let json = match checked {
         Ok(()) => codyscript_json::to_string(&Checked { ok: true }),
         Err(error) => codyscript_json::to_string(&Failed {
@@ -200,7 +254,7 @@ pub fn run_config_schema() -> String {
 
 /// `program` compiled by an engine with `executors` and `limits`: a
 /// CodyScript error for the program, a JavaScript one for the arguments.
-fn compile(
+fn compile_program(
     program: &str,
     executors: &JsValue,
     limits: &str,
@@ -272,6 +326,21 @@ struct Ran<'a> {
 struct Failed<'a> {
     ok: bool,
     error: &'a Error,
+}
+
+/// A CodyScript error as JavaScript throws one: an `Error` named
+/// `CodyScriptError`, with the error's fields (`code`, `message`, `path`,
+/// `tag`, `issues`) as properties.
+fn thrown(error: &Error) -> JsValue {
+    let thrown = js_sys::Error::new(error.message());
+    thrown.set_name("CodyScriptError");
+    if let Some(fields) = codyscript_json::to_string(error)
+        .ok()
+        .and_then(|json| JSON::parse(&json).ok())
+    {
+        Object::assign(&thrown, fields.unchecked_ref());
+    }
+    thrown.into()
 }
 
 fn outcome_json(outcome: &Result<RunResult, Error>) -> codyscript_json::serde_json::Result<String> {

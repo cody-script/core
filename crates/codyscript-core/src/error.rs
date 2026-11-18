@@ -113,6 +113,13 @@ impl fmt::Debug for Details {
 /// leaving out the parts that are empty.
 #[derive(Clone)]
 pub struct Error {
+    // Boxed, so a `Result` carrying an `Error` stays small on the paths
+    // where nothing fails.
+    inner: Box<Inner>,
+}
+
+#[derive(Clone)]
+struct Inner {
     code: ErrorCode,
     message: String,
     path: String,
@@ -143,68 +150,70 @@ impl Error {
             message.push(')');
         }
         Error {
-            code,
-            message,
-            path: details.path.unwrap_or_default(),
-            tag: details.tag,
-            issues: details.issues,
-            cause: details.cause,
+            inner: Box::new(Inner {
+                code,
+                message,
+                path: details.path.unwrap_or_default(),
+                tag: details.tag,
+                issues: details.issues,
+                cause: details.cause,
+            }),
         }
     }
 
     /// What went wrong.
     pub fn code(&self) -> ErrorCode {
-        self.code
+        self.inner.code
     }
 
     /// The full message, including where.
     pub fn message(&self) -> &str {
-        &self.message
+        &self.inner.message
     }
 
     /// JSON Pointer to the node that failed; `""` for the program's root.
     /// For `invalid_config`, to the run configuration's first problem.
     pub fn path(&self) -> &str {
-        &self.path
+        &self.inner.path
     }
 
     /// The failing node's `tag`, if it has one.
     pub fn tag(&self) -> Option<&str> {
-        self.tag.as_deref()
+        self.inner.tag.as_deref()
     }
 
     /// For `invalid_program`, `unknown_function` and `invalid_config`: every
     /// problem found, not just the first.
     pub fn issues(&self) -> Option<&[Issue]> {
-        self.issues.as_deref()
+        self.inner.issues.as_deref()
     }
 
     /// What caused this error: an executor's error for `function_failed`, the
     /// signal's reason for `aborted`.
     pub fn cause(&self) -> Option<&Cause> {
-        self.cause.as_ref()
+        self.inner.cause.as_ref()
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(&self.inner.message)
     }
 }
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut d = f.debug_struct("Error");
-        d.field("code", &self.code)
-            .field("message", &self.message)
-            .field("path", &self.path);
-        if let Some(tag) = &self.tag {
+        d.field("code", &self.inner.code)
+            .field("message", &self.inner.message)
+            .field("path", &self.inner.path);
+        if let Some(tag) = &self.inner.tag {
             d.field("tag", tag);
         }
-        if let Some(issues) = &self.issues {
+        if let Some(issues) = &self.inner.issues {
             d.field("issues", issues);
         }
-        if let Some(cause) = &self.cause {
+        if let Some(cause) = &self.inner.cause {
             d.field("cause", &cause.to_string());
         }
         d.finish()
@@ -215,15 +224,16 @@ impl Serialize for Error {
     /// `{ code, message, path, tag?, issues? }`: what a host might send an
     /// editor. The cause is left out; it's host-side detail.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let fields = 3 + usize::from(self.tag.is_some()) + usize::from(self.issues.is_some());
+        let fields =
+            3 + usize::from(self.inner.tag.is_some()) + usize::from(self.inner.issues.is_some());
         let mut error = serializer.serialize_struct("Error", fields)?;
-        error.serialize_field("code", &self.code)?;
-        error.serialize_field("message", &self.message)?;
-        error.serialize_field("path", &self.path)?;
-        if let Some(tag) = &self.tag {
+        error.serialize_field("code", &self.inner.code)?;
+        error.serialize_field("message", &self.inner.message)?;
+        error.serialize_field("path", &self.inner.path)?;
+        if let Some(tag) = &self.inner.tag {
             error.serialize_field("tag", tag)?;
         }
-        if let Some(issues) = &self.issues {
+        if let Some(issues) = &self.inner.issues {
             error.serialize_field("issues", issues)?;
         }
         error.end()
@@ -232,7 +242,8 @@ impl Serialize for Error {
 
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.cause
+        self.inner
+            .cause
             .as_deref()
             .map(|c| c as &(dyn StdError + 'static))
     }

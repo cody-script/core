@@ -40,7 +40,10 @@ assert_eq!(codyscript_json::to_string(&result).unwrap(),
   Numbers JSON can't hold (`NaN`, `Infinity`) are written as `null`, as
   `JSON.stringify` does.
 - `engine.compile_json(text)` (from `EngineJsonExt`) parses and compiles in
-  one go. Text that isn't JSON fails like any malformed program:
+  one go, keeping the parsed program rather than a copy. Compile a stored
+  rule once and run the `CompiledProgram` for each row: parsing and
+  compiling cost several times what a run does. Text that isn't JSON fails
+  like any malformed program:
   `invalid_program`, with the parser's message (saying where) and the
   parser's error as its `cause()`.
 - `from_serde_json` and `to_serde_json` convert to and from

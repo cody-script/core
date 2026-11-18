@@ -77,9 +77,10 @@ crates/
     run-config.schema.json  # JSON Schema for run configurations (IDEs)
     tests/           # json.rs (conventions), schema.rs, readme.rs
   codyscript-wasm/   # WebAssembly bindings (wasm-bindgen); not published.
-    src/lib.rs       # run(program, variables, executors, limits) for JavaScript;
-                     #   executors are objects of JavaScript functions
-                     #   ({ text: { trim } }), bridged via send_wrapper;
+    src/lib.rs       # compile(program, executors, limits) → Program, and
+                     #   run(program, variables, executors, limits), for
+                     #   JavaScript; executors are objects of JavaScript
+                     #   functions ({ text: { trim } }), bridged via send_wrapper;
                      #   debug(program, config, …, onPause), steps(…),
                      #   check(…) and runConfigSchema() for debugging
     tests/web.rs     # wasm-bindgen-test: Node by default, browsers too
@@ -139,7 +140,10 @@ closures already work with `async_executor`.
   For the debugger, it also needs a `NodeKind` (and `Node::kind`/`name` in
   `debug.rs`) and its parts in `push_parts`, in the order they run; a node
   is a step a debugger can pause at only if a `Task::Resolve`/`Execute`
-  runs it (`Task::step`).
+  runs it (`Task::step`). A plain run executes a list's first instruction
+  and resolves an instruction's input at once; a debugged run pushes them
+  as those tasks instead (`list`/`execute::<DEBUGGED>`) — keep any new
+  shortcut like that behind `DEBUGGED`.
 - **No stack overflows from programs.** Running never recurses: `run.rs` is
   one loop over explicit stacks (tasks, values, block results, scopes), and
   expressions are a flat arena evaluated the same way. Only compiling

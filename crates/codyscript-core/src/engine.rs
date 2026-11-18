@@ -110,11 +110,16 @@ pub(crate) struct Registered {
     pub executor: Arc<dyn Executor>,
 }
 
-/// Whether `executors` provide `exe`'s function `op`.
-fn provides(executors: &Executors, exe: &str, op: &str) -> bool {
+/// The executor that provides `exe`'s function `op`, if `executors` do.
+pub(crate) fn provider<'e>(
+    executors: &'e Executors,
+    exe: &str,
+    op: &str,
+) -> Option<&'e Arc<dyn Executor>> {
     executors
         .get(exe)
-        .is_some_and(|registered| registered.functions.contains(op))
+        .filter(|registered| registered.functions.contains(op))
+        .map(|registered| &registered.executor)
 }
 
 /// Every function `executors` provide, by full name (`text.trim`), sorted.
@@ -167,32 +172,55 @@ impl Engine {
     /// it was registered with.
     pub fn has_function(&self, name: &str) -> bool {
         name.split_once('.')
-            .is_some_and(|(exe, op)| provides(&self.inner.executors, exe, op))
+            .is_some_and(|(exe, op)| provider(&self.inner.executors, exe, op).is_some())
     }
 
     /// Validates `program` (shape, depth, functions, expression syntax, and
     /// that the engine provides every external function it declares) once,
     /// and copies it: later changes to `program` can't reach the result.
+    /// [`compile_owned`](Engine::compile_owned) skips the copy.
     pub fn compile(&self, program: &Value) -> Result<CompiledProgram, Error> {
-        let executors = &self.inner.executors;
-        let root = validate(program, self.inner.limits.max_depth, &|exe, op| {
-            provides(executors, exe, op)
-        })?;
-        Ok(CompiledProgram {
-            engine: Arc::clone(&self.inner),
-            program: program.clone(),
-            root,
-        })
+        let root = self.tree(program)?;
+        Ok(self.inner.compiled(program.clone(), root))
     }
 
-    /// `compile(program)?.run(options)`.
+    /// [`compile`](Engine::compile), keeping `program` itself rather than a
+    /// copy: cheaper when the caller has no further use for it, as with a
+    /// program just parsed from text.
+    pub fn compile_owned(&self, program: Value) -> Result<CompiledProgram, Error> {
+        let root = self.tree(&program)?;
+        Ok(self.inner.compiled(program, root))
+    }
+
+    /// Compiles and runs `program` once, without keeping a copy of it. To run
+    /// a program more than once, [`compile`](Engine::compile) it once instead.
     pub async fn run(&self, program: &Value, options: RunOptions) -> Result<RunResult, Error> {
-        self.compile(program)?.run(options).await
+        let root = self.tree(program)?;
+        self.inner.run(&root, options).await
     }
 
     /// [`run`](Engine::run), blocking the current thread until it finishes.
     pub fn run_blocking(&self, program: &Value, options: RunOptions) -> Result<RunResult, Error> {
         block_on(self.run(program, options))
+    }
+
+    /// Validates `program`, building the tree the engine runs.
+    fn tree(&self, program: &Value) -> Result<Program, Error> {
+        validate(program, self.inner.limits.max_depth, &self.inner.executors)
+    }
+}
+
+impl Inner {
+    fn compiled(self: &Arc<Self>, program: Value, root: Program) -> CompiledProgram {
+        CompiledProgram {
+            engine: Arc::clone(self),
+            program,
+            root,
+        }
+    }
+
+    async fn run(&self, root: &Program, options: RunOptions) -> Result<RunResult, Error> {
+        run::run(root, self.limits, options, None).await
     }
 }
 
@@ -316,15 +344,15 @@ pub struct CompiledProgram {
 }
 
 impl CompiledProgram {
-    /// The program, as compiled (a copy of what was given to `compile`).
+    /// The program, as compiled (a copy of what was given to `compile`, or
+    /// what was given to `compile_owned`).
     pub fn program(&self) -> &Value {
         &self.program
     }
 
     /// Runs the program.
     pub async fn run(&self, options: RunOptions) -> Result<RunResult, Error> {
-        let engine = &self.engine;
-        run::run(&self.root, &engine.executors, engine.limits, options, None).await
+        self.engine.run(&self.root, options).await
     }
 
     /// Runs the program under `debugger`, pausing before each step
@@ -349,17 +377,9 @@ impl CompiledProgram {
         breakpoints: impl IntoIterator<Item = Breakpoint>,
         mut debugger: impl Debugger,
     ) -> Result<RunResult, Error> {
-        let engine = &self.engine;
         let breakpoints = breakpoints.into_iter().collect();
         let session = Session::new(&self.root, breakpoints, &mut debugger)?;
-        run::run(
-            &self.root,
-            &engine.executors,
-            engine.limits,
-            options,
-            Some(session),
-        )
-        .await
+        run::run(&self.root, self.engine.limits, options, Some(session)).await
     }
 
     /// [`debug`](CompiledProgram::debug), blocking the current thread until
@@ -417,15 +437,21 @@ impl Wake for ThreadWaker {
     }
 }
 
+thread_local! {
+    /// This thread's waker, made once and shared by every `block_on` on it.
+    static WAKER: Waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+}
+
 /// Polls `future` to completion on this thread, parking between polls.
 fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
-    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-    let mut cx = Context::from_waker(&waker);
-    loop {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
-            return output;
+    WAKER.with(|waker| {
+        let mut cx = Context::from_waker(waker);
+        loop {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                return output;
+            }
+            std::thread::park();
         }
-        std::thread::park();
-    }
+    })
 }

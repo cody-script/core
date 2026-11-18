@@ -9,7 +9,6 @@
 
 use std::cmp::Ordering;
 
-use crate::error::Error;
 use crate::value::{Number, Value};
 
 /// A parsed expression.
@@ -289,12 +288,15 @@ impl<'s> Parser<'s> {
 
 /// Parses `source`; the error says what's wrong.
 pub(crate) fn parse(source: &str, max_depth: usize) -> Result<Ast, String> {
+    let tokens = tokenize(source)?;
+    // Every node consumes a token, so this is room enough.
+    let nodes = Vec::with_capacity(tokens.len());
     let mut parser = Parser {
-        tokens: tokenize(source)?,
+        tokens,
         i: 0,
         depth: 0,
         max_depth,
-        nodes: Vec::new(),
+        nodes,
     };
     let root = parser.level(0)?;
     if let Some(token) = parser.tokens.get(parser.i) {
@@ -317,7 +319,14 @@ pub(crate) trait Context<'v> {
     /// A variable's value, if it's defined.
     fn get(&self, name: &str) -> Option<&'v Value>;
     /// Counts one step; fails past the limit or once aborted.
-    fn step(&mut self) -> Result<(), Error>;
+    fn step(&mut self) -> Result<(), Stop>;
+}
+
+/// Why a step was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stop {
+    Aborted,
+    StepLimit,
 }
 
 /// Why an evaluation failed.
@@ -327,8 +336,8 @@ pub(crate) enum Fault {
     Undefined(String),
     /// A type error, with its message.
     Type(String),
-    /// A step failed: step limit or abort.
-    Stop(Error),
+    /// A step was refused.
+    Stop(Stop),
 }
 
 /// A value during evaluation: borrowed from the tree or the scope where
@@ -420,8 +429,9 @@ pub(crate) fn number(n: f64) -> Value {
     }
 }
 
+/// What's left to do once an operand is evaluated.
+#[derive(Clone, Copy)]
 enum Task {
-    Eval(usize),
     Unary(Unary),
     /// The left operand is on the value stack; evaluate the right one.
     Right(Op, usize),
@@ -430,31 +440,35 @@ enum Task {
 
 /// Evaluates `ast`. `&&` and `||` short-circuit and return an operand, as in
 /// JavaScript. Every node evaluated is one step, counted before its operands.
-pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut dyn Context<'v>) -> Result<Value, Fault> {
-    let mut tasks = vec![Task::Eval(ast.root)];
-    let mut values: Vec<V<'v>> = Vec::new();
-    let pop = |values: &mut Vec<V<'v>>| values.pop().unwrap_or(V::Null);
-    while let Some(task) = tasks.pop() {
-        match task {
-            Task::Eval(i) => {
-                cx.step().map_err(Fault::Stop)?;
-                match &ast.nodes[i] {
-                    Node::Lit(v) => values.push(V::of(v)),
-                    Node::Num(n) => values.push(V::Num(*n, None)),
-                    Node::Name(name) => match cx.get(name) {
-                        Some(v) => values.push(V::of(v)),
-                        None => return Err(Fault::Undefined(name.clone())),
-                    },
-                    Node::Unary(op, a) => {
-                        tasks.push(Task::Unary(*op));
-                        tasks.push(Task::Eval(*a));
-                    }
-                    Node::Binary(op, a, c) => {
-                        tasks.push(Task::Right(*op, *c));
-                        tasks.push(Task::Eval(*a));
-                    }
+pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Value, Fault> {
+    let mut tasks = Stack::new(Task::Apply(Op::Add)); // (only a filler)
+    let mut values = Stack::new(V::Null);
+    let pop = |values: &mut Stack<V<'v>>| values.pop().unwrap_or(V::Null);
+    // The node to evaluate now; once there's none, the next task.
+    let mut next = Some(ast.root);
+    loop {
+        if let Some(i) = next.take() {
+            cx.step().map_err(Fault::Stop)?;
+            match &ast.nodes[i] {
+                Node::Lit(v) => values.push(V::of(v)),
+                Node::Num(n) => values.push(V::Num(*n, None)),
+                Node::Name(name) => match cx.get(name) {
+                    Some(v) => values.push(V::of(v)),
+                    None => return Err(Fault::Undefined(name.clone())),
+                },
+                Node::Unary(op, a) => {
+                    tasks.push(Task::Unary(*op));
+                    next = Some(*a);
+                }
+                Node::Binary(op, a, c) => {
+                    tasks.push(Task::Right(*op, *c));
+                    next = Some(*a);
                 }
             }
+            continue;
+        }
+        let Some(task) = tasks.pop() else { break };
+        match task {
             Task::Unary(op) => {
                 let a = pop(&mut values);
                 values.push(match (op, a) {
@@ -469,15 +483,15 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut dyn Context<'v>) -> Result<Val
                 });
             }
             Task::Right(op @ (Op::And | Op::Or), c) => {
-                let a = values.last().copied().unwrap_or(V::Null);
+                let a = values.last().unwrap_or(V::Null);
                 if (op == Op::And) == a.truthy() {
                     values.pop();
-                    tasks.push(Task::Eval(c));
+                    next = Some(c);
                 }
             }
             Task::Right(op, c) => {
                 tasks.push(Task::Apply(op));
-                tasks.push(Task::Eval(c));
+                next = Some(c);
             }
             Task::Apply(op) => {
                 let c = pop(&mut values);
@@ -487,6 +501,55 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut dyn Context<'v>) -> Result<Val
         }
     }
     Ok(pop(&mut values).into_value())
+}
+
+/// How many items a [`Stack`] holds before it needs the heap: enough for
+/// any ordinary expression.
+const INLINE: usize = 8;
+
+/// A stack for `evaluate` that keeps its first [`INLINE`] items in place,
+/// so evaluating an ordinary expression doesn't allocate; only a long chain
+/// spills onto the heap.
+struct Stack<T> {
+    inline: [T; INLINE],
+    len: usize,
+    /// What doesn't fit inline; only used once `inline` is full.
+    spill: Vec<T>,
+}
+
+impl<T: Copy> Stack<T> {
+    /// An empty stack; `filler` only initializes the unused slots.
+    fn new(filler: T) -> Self {
+        Stack {
+            inline: [filler; INLINE],
+            len: 0,
+            spill: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, item: T) {
+        if self.len < INLINE {
+            self.inline[self.len] = item;
+            self.len += 1;
+        } else {
+            self.spill.push(item);
+        }
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        if let Some(item) = self.spill.pop() {
+            return Some(item);
+        }
+        self.len = self.len.checked_sub(1)?;
+        Some(self.inline[self.len])
+    }
+
+    fn last(&self) -> Option<T> {
+        match self.spill.last() {
+            Some(item) => Some(*item),
+            None => self.len.checked_sub(1).map(|i| self.inline[i]),
+        }
+    }
 }
 
 /// A comparison or arithmetic operator applied to two evaluated operands.
@@ -686,6 +749,43 @@ mod tests {
     }
 
     #[test]
+    fn the_stack_is_last_in_first_out_past_its_inline_part() {
+        let mut stack = Stack::new(0);
+        for i in 0..INLINE * 3 {
+            stack.push(i);
+            assert_eq!(stack.last(), Some(i));
+        }
+        for i in (0..INLINE * 3).rev() {
+            assert_eq!(stack.last(), Some(i));
+            assert_eq!(stack.pop(), Some(i));
+        }
+        assert_eq!((stack.pop(), stack.last()), (None, None));
+    }
+
+    #[test]
+    fn deep_nesting_spills_operands_in_order() {
+        // `1-(2-(3-…))`: every left operand waits on the stack.
+        let mut source = String::new();
+        for i in 1..100 {
+            source.push_str(&format!("{i}-("));
+        }
+        source.push_str("100");
+        source.push_str(&")".repeat(99));
+        let ast = parse(&source, 128).unwrap();
+        struct Cx;
+        impl<'v> Context<'v> for Cx {
+            fn get(&self, _: &str) -> Option<&'v Value> {
+                None
+            }
+            fn step(&mut self) -> Result<(), Stop> {
+                Ok(())
+            }
+        }
+        let expected = (1..=100).rev().fold(0, |acc, i| i - acc);
+        assert_eq!(evaluate(&ast, &mut Cx).unwrap(), Value::from(expected));
+    }
+
+    #[test]
     fn a_long_chain_neither_overflows_nor_recurses_on_drop() {
         let source = vec!["1"; 200_000].join("+");
         let ast = parse(&source, 128).unwrap();
@@ -694,7 +794,7 @@ mod tests {
             fn get(&self, _: &str) -> Option<&'v Value> {
                 None
             }
-            fn step(&mut self) -> Result<(), Error> {
+            fn step(&mut self) -> Result<(), Stop> {
                 Ok(())
             }
         }

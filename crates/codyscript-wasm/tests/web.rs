@@ -11,7 +11,8 @@
 
 use codyscript_core::{Engine, ErrorCode, RunOptions, Signal, Value, value};
 use js_sys::{Function, Object, Reflect};
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -256,6 +257,104 @@ async fn wrong_arguments_reject() {
     assert!(run("", function.into(), "").await.is_err());
     let not_a_function = object(&[("f", object(&[("x", &JsValue::from(1))]).as_ref())]);
     assert!(run("", not_a_function.into(), "").await.is_err());
+}
+
+// ── Compiled once, run many times ───────────────────────────────────────────
+
+/// Runs a compiled program; the outcome, parsed.
+async fn run_compiled(program: &codyscript_wasm::Program, variables: &str) -> Value {
+    let outcome = JsFuture::from(program.run(variables.into()))
+        .await
+        .unwrap_or_else(|_| panic!("run rejected"));
+    codyscript_json::from_str(&outcome.as_string().unwrap()).unwrap()
+}
+
+/// A property of a thrown JavaScript value.
+fn property(thrown: &JsValue, key: &str) -> JsValue {
+    Reflect::get(thrown, &key.into()).unwrap()
+}
+
+#[wasm_bindgen_test]
+async fn a_compiled_program_runs_many_times() {
+    let exe = text_executor();
+    let program = codyscript_wasm::compile(README_RULE, exe.clone(), "").unwrap();
+    for (name, expected) in [("  Ada ", value!("Ada")), ("Grace", value!("Grace"))] {
+        let variables = to_json(&value!({ "Name": name }));
+        let outcome = run_compiled(&program, &variables).await;
+        assert_eq!(outcome["value"], expected);
+        // The same outcome as compiling and running in one go.
+        assert_eq!(outcome, run(README_RULE, &variables, exe.clone(), "").await);
+    }
+    let blank = run_compiled(&program, r#"{"Name":"  "}"#).await;
+    assert_eq!(blank["value"], value!({ "error": "Name is required" }));
+    // Errors while running resolve, as from `run`.
+    let missing = run_compiled(&program, "").await;
+    assert_eq!(missing["ok"], false);
+    assert_eq!(missing["error"]["code"], "undefined_variable");
+}
+
+#[wasm_bindgen_test]
+async fn compiling_throws_a_codyscript_error_for_an_invalid_program() {
+    let nope = r#"{ "ext": { "nope": ["x"] }, "call": { "nope.x": {} } }"#;
+    let Err(unknown) = codyscript_wasm::compile(nope, JsValue::NULL, "") else {
+        panic!("compiled");
+    };
+    assert!(unknown.is_instance_of::<js_sys::Error>());
+    assert_eq!(property(&unknown, "name"), "CodyScriptError");
+    assert_eq!(property(&unknown, "code"), "unknown_function");
+    assert_eq!(property(&unknown, "path"), "/ext/nope/0");
+    assert_eq!(
+        property(&unknown, "message"),
+        r#"Unknown function "nope.x" at /ext/nope/0"#
+    );
+    let issues = js_sys::JSON::stringify(&property(&unknown, "issues")).unwrap();
+    assert_eq!(
+        issues,
+        r#"[{"path":"/ext/nope/0","message":"Unknown function \"nope.x\""}]"#
+    );
+
+    let Err(not_json) = codyscript_wasm::compile("{", JsValue::NULL, "") else {
+        panic!("compiled");
+    };
+    assert_eq!(property(&not_json, "code"), "invalid_program");
+}
+
+#[wasm_bindgen_test]
+async fn wrong_arguments_to_a_compiled_program_throw_or_reject() {
+    // Limits that aren't JSON, executors that aren't objects of functions:
+    // a plain Error, with no CodyScript code.
+    let Err(limits) = codyscript_wasm::compile("1", JsValue::NULL, "nope") else {
+        panic!("compiled");
+    };
+    assert!(property(&limits, "code").is_undefined());
+    assert!(codyscript_wasm::compile("1", JsValue::from(3), "").is_err());
+
+    let program = codyscript_wasm::compile("1", JsValue::NULL, "").unwrap();
+    assert!(JsFuture::from(program.run("[1]".into())).await.is_err());
+    assert_eq!(run_compiled(&program, "").await["value"], 1);
+}
+
+#[wasm_bindgen_test]
+async fn runs_of_one_program_may_overlap_and_outlive_it() {
+    let slow = js(r#"return new Promise((resolve) =>
+                       setTimeout(() => resolve(call.input.n), call.input.n));"#);
+    let program = codyscript_wasm::compile(
+        r#"{ "ext": { "slow": ["x"] }, "call": { "slow.x": { "n": { "ref": "n" } } } }"#,
+        executors(&[("slow", &[("x", slow)])]),
+        "",
+    )
+    .unwrap();
+    let first = JsFuture::from(program.run(r#"{"n":30}"#.into()));
+    let second = JsFuture::from(program.run(r#"{"n":1}"#.into()));
+    // Freed while both are in flight: they keep what they need.
+    drop(program);
+    let value = |outcome: Result<JsValue, JsValue>| {
+        let outcome: Value =
+            codyscript_json::from_str(&outcome.unwrap().as_string().unwrap()).unwrap();
+        outcome["value"].clone()
+    };
+    assert_eq!(value(second.await), 1);
+    assert_eq!(value(first.await), 30);
 }
 
 #[wasm_bindgen_test]

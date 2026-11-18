@@ -3,10 +3,14 @@
 //! every call names and every expression's syntax — reporting every problem,
 //! and builds the tree the engine runs.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::Arc;
 
+use crate::engine::{Executors, provider};
 use crate::error::{Details, Error, ErrorCode, Issue};
+use crate::executor::Executor;
 use crate::expression::{Ast, parse};
 use crate::program::{
     Call, Expression, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
@@ -41,14 +45,35 @@ const ROOT_FIELDS: &[&str] = &[FUNCTIONS, EXTERNALS];
 /// reach `Object.prototype`; refused so programs stay portable between the two.
 const RESERVED: [&str; 3] = ["__proto__", "prototype", "constructor"];
 
-/// Escapes one JSON Pointer (RFC 6901) reference token.
-pub(crate) fn escape_key(key: &str) -> String {
-    key.replace('~', "~0").replace('/', "~1")
+/// Escapes one JSON Pointer (RFC 6901) reference token. Most keys need no
+/// escaping, and aren't copied.
+pub(crate) fn escape_key(key: &str) -> Cow<'_, str> {
+    if key.contains(['~', '/']) {
+        Cow::Owned(key.replace('~', "~0").replace('/', "~1"))
+    } else {
+        Cow::Borrowed(key)
+    }
 }
+
+// Paths are kept in the program tree, so these make strings of exactly
+// their length.
 
 /// The JSON Pointer `path` extended by `key`.
 pub(crate) fn child(path: &str, key: &str) -> String {
-    format!("{path}/{}", escape_key(key))
+    let key = escape_key(key);
+    let mut pointer = String::with_capacity(path.len() + 1 + key.len());
+    pointer.push_str(path);
+    pointer.push('/');
+    pointer.push_str(&key);
+    pointer
+}
+
+/// The JSON Pointer `path` extended by list index `i`.
+fn child_at(path: &str, i: usize) -> String {
+    let digits = i.checked_ilog10().unwrap_or(0) as usize + 1;
+    let mut pointer = String::with_capacity(path.len() + 1 + digits);
+    let _ = write!(pointer, "{path}/{i}"); // writing to a String can't fail
+    pointer
 }
 
 /// JSON Pointer for a list of keys.
@@ -66,12 +91,27 @@ fn field<'v>(node: &'v Map, key: &str) -> &'v Value {
     node.get(key).unwrap_or(&NULL)
 }
 
+/// Whether [`Walk::value`] could refuse `v`: it's a container, or a number
+/// that isn't finite.
+fn may_fail(v: &Value) -> bool {
+    match v {
+        Value::Array(_) | Value::Object(_) => true,
+        Value::Number(n) => !n.is_finite(),
+        Value::Null | Value::Bool(_) | Value::String(_) => false,
+    }
+}
+
+/// An external function a program declares: where its full name's first
+/// dot is, and the executor that provides it (`None` if the engine doesn't,
+/// which is already an issue).
+type Declared = (usize, Option<Arc<dyn Executor>>);
+
 /// What a call's name refers to.
 enum Target {
     /// One of the program's functions, by index.
     Function(usize),
-    /// An external function: its name, and where its first dot is.
-    External(String, usize),
+    /// An external function the program declares, by its full name.
+    External(String, Declared),
 }
 
 struct RawIssue {
@@ -81,18 +121,18 @@ struct RawIssue {
     tag: Option<String>,
 }
 
-/// Validates `program` and builds its tree. `has_function(exe, op)` says
-/// whether the engine provides external function `<exe>.<op>`. Fails with
+/// Validates `program` and builds its tree, finding each external function
+/// it declares among `executors`. Fails with
 /// `invalid_program` or `unknown_function` (whichever problem comes first),
 /// listing every issue.
 pub(crate) fn validate(
     program: &Value,
     max_depth: usize,
-    has_function: &dyn Fn(&str, &str) -> bool,
+    executors: &Executors,
 ) -> Result<Program, Error> {
     let mut walk = Walk {
         max_depth,
-        has_function,
+        executors,
         expressions: HashMap::new(),
         functions: HashMap::new(),
         externals: HashMap::new(),
@@ -107,7 +147,7 @@ pub(crate) fn validate(
     let table = root
         .and_then(|map| map.get(FUNCTIONS))
         .and_then(|table| walk.function_names(table));
-    let body = walk.node(program, "", 0, ROOT_FIELDS);
+    let body = walk.node(program, String::new(), 0, ROOT_FIELDS);
     let functions = match table {
         Some(table) => walk.function_bodies(table),
         None => Some(Vec::new()),
@@ -146,14 +186,16 @@ pub(crate) fn validate(
 
 struct Walk<'a> {
     max_depth: usize,
-    has_function: &'a dyn Fn(&str, &str) -> bool,
-    /// Every expression's parse, by its source: each is parsed once.
-    expressions: HashMap<String, Arc<Ast>>,
+    /// The engine's executors: where external functions are found.
+    executors: &'a Executors,
+    /// Every expression's parse, by its source: each is parsed once, and
+    /// nodes with the same expression share its source and parse.
+    expressions: HashMap<Arc<str>, Arc<Ast>>,
     /// The program's own functions (`fn`) by name, with their index.
     functions: HashMap<String, usize>,
     /// The external functions it declares (`ext`) by full name
-    /// (`text.trim`), with where their first dot is.
-    externals: HashMap<String, usize>,
+    /// (`text.trim`).
+    externals: HashMap<String, Declared>,
     issues: Vec<RawIssue>,
 }
 
@@ -190,7 +232,7 @@ impl Walk<'_> {
         v: &'v Value,
         path: &str,
         depth: usize,
-        allowed: Option<&[&str]>,
+        allowed: Option<&dyn Fn(&str) -> bool>,
     ) -> Option<&'v Map> {
         let Value::Object(map) = v else {
             self.fail(path.into(), "Expected an object");
@@ -201,7 +243,7 @@ impl Walk<'_> {
         }
         if let Some(allowed) = allowed {
             for key in map.keys() {
-                if !allowed.contains(&key.as_str()) {
+                if !allowed(key) {
                     self.fail(child(path, key), format!("Unknown field \"{key}\""));
                 }
             }
@@ -228,17 +270,22 @@ impl Walk<'_> {
                     self.fail(path.into(), "Expected a finite number");
                 }
             }
+            // Items that can't fail need no path, so none is built for them.
             Value::Array(items) => {
                 if self.container(v, path, depth) {
                     for (i, item) in items.iter().enumerate() {
-                        self.value(item, &child(path, &i.to_string()), depth + 1);
+                        if may_fail(item) {
+                            self.value(item, &child_at(path, i), depth + 1);
+                        }
                     }
                 }
             }
             Value::Object(map) => {
                 if self.container(v, path, depth) {
                     for (key, item) in map {
-                        self.value(item, &child(path, key), depth + 1);
+                        if may_fail(item) {
+                            self.value(item, &child(path, key), depth + 1);
+                        }
                     }
                 }
             }
@@ -256,7 +303,7 @@ impl Walk<'_> {
         let mut list = Some(Vec::with_capacity(items.len()));
         for (i, item) in items.iter().enumerate() {
             // Check every instruction, even after one fails.
-            let ins = self.instruction(item, &child(path, &i.to_string()), depth + 1);
+            let ins = self.instruction(item, child_at(path, i), depth + 1);
             match (ins, list.as_mut()) {
                 (Some(ins), Some(list)) => list.push(ins),
                 _ => list = None,
@@ -311,18 +358,18 @@ impl Walk<'_> {
             self.fail(path.into(), format!("Expected {what} object"));
             return None;
         };
-        let types: Vec<&'static str> = kinds
-            .iter()
-            .map(|(k, _)| *k)
-            .filter(|k| map.contains_key(k))
-            .collect();
-        let [ty] = types[..] else {
-            let quote = |k: &&str| format!("\"{k}\"");
-            let expected: Vec<String> = kinds.iter().map(|(k, _)| quote(k)).collect();
-            let found = if types.is_empty() {
+        let mut types = kinds.iter().filter(|(k, _)| map.contains_key(k));
+        let (Some(&(ty, fields)), None) = (types.next(), types.next()) else {
+            let quote = |(k, _): &(&str, _)| format!("\"{k}\"");
+            let expected: Vec<String> = kinds.iter().map(quote).collect();
+            let found: Vec<String> = kinds
+                .iter()
+                .filter(|(k, _)| map.contains_key(k))
+                .map(quote)
+                .collect();
+            let found = if found.is_empty() {
                 String::new()
             } else {
-                let found: Vec<String> = types.iter().map(quote).collect();
                 format!(", found {}", found.join(" and "))
             };
             let message = format!(
@@ -332,13 +379,8 @@ impl Walk<'_> {
             self.fail(path.into(), message);
             return None;
         };
-        let fields = kinds
-            .iter()
-            .find(|(k, _)| *k == ty)
-            .map_or(&[][..], |(_, e)| e);
-        let mut allowed = vec![ty, "tag"];
-        allowed.extend_from_slice(fields);
-        allowed.extend_from_slice(extra);
+        let allowed =
+            |key: &str| key == ty || key == "tag" || fields.contains(&key) || extra.contains(&key);
         let node = self.record(v, path, depth, Some(&allowed))?;
         self.tag(node, path);
         Some((ty, node))
@@ -371,7 +413,7 @@ impl Walk<'_> {
                 continue;
             }
             for (i, op) in list.iter().enumerate() {
-                let op_path = child(&at, &i.to_string());
+                let op_path = child_at(&at, i);
                 let Some(op) = self.name(op, &op_path) else {
                     continue;
                 };
@@ -383,7 +425,8 @@ impl Walk<'_> {
                     self.fail(op_path, format!("Duplicate function \"{name}\""));
                     continue;
                 }
-                if !(self.has_function)(exe, op) {
+                let executor = provider(self.executors, exe, op).cloned();
+                if executor.is_none() {
                     self.issues.push(RawIssue {
                         path: op_path,
                         message: format!("Unknown function \"{name}\""),
@@ -391,7 +434,7 @@ impl Walk<'_> {
                         tag: None,
                     });
                 }
-                self.externals.insert(name, exe.len());
+                self.externals.insert(name, (exe.len(), executor));
             }
         }
     }
@@ -423,7 +466,7 @@ impl Walk<'_> {
         let path = child("", FUNCTIONS);
         let mut functions = Some(Vec::with_capacity(table.len()));
         for (name, body) in table {
-            let body = self.input(body, &child(&path, name), 2);
+            let body = self.input(body, child(&path, name), 2);
             match (body, functions.as_mut()) {
                 (Some(body), Some(list)) => list.push(Function {
                     name: name.clone(),
@@ -436,7 +479,7 @@ impl Walk<'_> {
     }
 
     /// A literal (`null`, boolean, finite number, string) or an input node.
-    fn input(&mut self, v: &Value, path: &str, depth: usize) -> Option<Input> {
+    fn input(&mut self, v: &Value, path: String, depth: usize) -> Option<Input> {
         self.node(v, path, depth, &[])
     }
 
@@ -444,40 +487,36 @@ impl Walk<'_> {
     fn node(
         &mut self,
         v: &Value,
-        path: &str,
+        path: String,
         depth: usize,
         extra: &[&'static str],
     ) -> Option<Input> {
         if !(v.is_object() || v.is_array()) {
-            self.value(v, path, depth);
+            self.value(v, &path, depth);
             return Some(Input {
-                path: path.into(),
+                path,
                 tag: None,
                 kind: InputKind::Const(v.clone()),
             });
         }
-        let (ty, node) = self.header(v, path, depth, (INPUTS, "an input"), extra)?;
+        let (ty, node) = self.header(v, &path, depth, (INPUTS, "an input"), extra)?;
         let tag = node.get("tag").and_then(Value::as_str).map(str::to_owned);
         let kind = match ty {
             "val" => {
                 let val = field(node, "val");
-                self.value(val, &child(path, "val"), depth + 1);
+                self.value(val, &child(&path, "val"), depth + 1);
                 Some(InputKind::Const(val.clone()))
             }
             "ref" => self
-                .name(field(node, "ref"), &child(path, "ref"))
+                .name(field(node, "ref"), &child(&path, "ref"))
                 .map(|name| InputKind::Ref(name.to_owned())),
-            "x" => self.expression(field(node, "x"), child(path, "x")),
-            "call" => self.call(node, path, depth, tag.as_deref()),
+            "x" => self.expression(field(node, "x"), child(&path, "x")),
+            "call" => self.call(node, &path, depth, tag.as_deref()),
             _ => self
-                .block(field(node, "do"), &child(path, "do"), depth + 1)
+                .block(field(node, "do"), &child(&path, "do"), depth + 1)
                 .map(InputKind::Do),
         }?;
-        Some(Input {
-            path: path.into(),
-            tag,
-            kind,
-        })
+        Some(Input { path, tag, kind })
     }
 
     fn expression(&mut self, v: &Value, path: String) -> Option<InputKind> {
@@ -485,7 +524,7 @@ impl Walk<'_> {
         if !self.expressions.contains_key(source) {
             match parse(source, self.max_depth) {
                 Ok(ast) => {
-                    self.expressions.insert(source.to_owned(), Arc::new(ast));
+                    self.expressions.insert(source.into(), Arc::new(ast));
                 }
                 Err(message) => {
                     self.fail(path, format!("{message} in \"{source}\""));
@@ -493,10 +532,10 @@ impl Walk<'_> {
                 }
             }
         }
-        let ast = self.expressions.get(source)?.clone();
+        let (source, ast) = self.expressions.get_key_value(source)?;
         Some(InputKind::X(Expression {
-            source: source.to_owned(),
-            ast,
+            source: Arc::clone(source),
+            ast: Arc::clone(ast),
             path,
         }))
     }
@@ -531,12 +570,16 @@ impl Walk<'_> {
         }
         Some(match call? {
             (Target::Function(function), args) => InputKind::Call(Call { function, args }),
-            (Target::External(name, dot), args) => InputKind::External(External {
-                name,
-                dot,
-                args,
-                arg: arg.cloned(),
-            }),
+            (Target::External(name, (dot, executor)), args) => {
+                InputKind::External(Box::new(External {
+                    // An unknown function is already an issue.
+                    executor: executor?,
+                    name,
+                    dot,
+                    args,
+                    arg: arg.cloned(),
+                }))
+            }
         })
     }
 
@@ -546,13 +589,13 @@ impl Walk<'_> {
         if let Some(&index) = self.functions.get(name) {
             return Some(Target::Function(index));
         }
-        if let Some(&dot) = self.externals.get(name) {
-            return Some(Target::External(name.to_owned(), dot));
+        if let Some(declared) = self.externals.get(name) {
+            return Some(Target::External(name.to_owned(), declared.clone()));
         }
         // Most likely a host function the program forgot to declare.
         let provided = name
             .split_once('.')
-            .is_some_and(|(exe, op)| (self.has_function)(exe, op));
+            .is_some_and(|(exe, op)| provider(self.executors, exe, op).is_some());
         let message = if provided {
             format!("Function \"{name}\" isn't declared in \"ext\"")
         } else {
@@ -577,7 +620,7 @@ impl Walk<'_> {
                 self.fail(arg_path.clone(), "Expected a non-empty name");
                 list = None;
             }
-            let input = self.input(from, &arg_path, depth + 1);
+            let input = self.input(from, arg_path, depth + 1);
             match (input, list.as_mut()) {
                 (Some(input), Some(list)) => list.push((arg.clone(), input)),
                 _ => list = None,
@@ -586,18 +629,18 @@ impl Walk<'_> {
         list
     }
 
-    fn instruction(&mut self, v: &Value, path: &str, depth: usize) -> Option<Instruction> {
-        let (ty, node) = self.header(v, path, depth, (INSTRUCTIONS, "an instruction"), &[])?;
+    fn instruction(&mut self, v: &Value, path: String, depth: usize) -> Option<Instruction> {
+        let (ty, node) = self.header(v, &path, depth, (INSTRUCTIONS, "an instruction"), &[])?;
         let tag = node.get("tag").and_then(Value::as_str).map(str::to_owned);
         let kind = match ty {
             "set" => {
-                let at = child(path, "set");
+                let at = child(&path, "set");
                 let (name, to) = self.single(field(node, "set"), &at, depth + 1)?;
                 if name.is_empty() {
                     self.fail(at, "Expected a non-empty string");
                     return None;
                 }
-                let to = self.input(to, &child(&at, name), depth + 2)?;
+                let to = self.input(to, child(&at, name), depth + 2)?;
                 InstructionKind::Set {
                     name: name.clone(),
                     to,
@@ -605,17 +648,17 @@ impl Walk<'_> {
             }
             "ret" => InstructionKind::Ret(self.input(
                 field(node, "ret"),
-                &child(path, "ret"),
+                child(&path, "ret"),
                 depth + 1,
             )?),
             _ => {
                 // "if" or "for". An `el` on a loop is already an unknown
                 // field, but it's checked all the same.
-                let test = self.input(field(node, ty), &child(path, ty), depth + 1);
-                let body = self.block(field(node, "do"), &child(path, "do"), depth + 1);
+                let test = self.input(field(node, ty), child(&path, ty), depth + 1);
+                let body = self.block(field(node, "do"), &child(&path, "do"), depth + 1);
                 let otherwise = node
                     .get("el")
-                    .map(|el| self.block(el, &child(path, "el"), depth + 1));
+                    .map(|el| self.block(el, &child(&path, "el"), depth + 1));
                 let (test, body) = (test?, body?);
                 if ty == "if" {
                     InstructionKind::If {
@@ -631,11 +674,7 @@ impl Walk<'_> {
                 }
             }
         };
-        Some(Instruction {
-            path: path.into(),
-            tag,
-            kind,
-        })
+        Some(Instruction { path, tag, kind })
     }
 }
 
@@ -648,5 +687,17 @@ mod tests {
         assert_eq!(pointer(&["a/b", "c~d", "0"]), "/a~1b/c~0d/0");
         assert_eq!(pointer(&[]), "");
         assert_eq!(escape_key("~/"), "~0~1");
+    }
+
+    #[test]
+    fn paths_are_exactly_their_length() {
+        for (i, expected) in [(0, "/a/0"), (9, "/a/9"), (10, "/a/10"), (12345, "/a/12345")] {
+            let path = child_at("/a", i);
+            assert_eq!(path, expected);
+            assert_eq!(path.capacity(), path.len());
+        }
+        let path = child("/a", "b/c");
+        assert_eq!(path, "/a/b~1c");
+        assert_eq!(path.capacity(), path.len());
     }
 }

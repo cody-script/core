@@ -12,7 +12,7 @@ npm install @cody-script/core-wasm
 ```
 
 ```js
-import init, { run } from "@cody-script/core-wasm";
+import init, { compile, run } from "@cody-script/core-wasm";
 await init(); // in Node: await init({ module_or_path: await readFile(wasmPath) })
 
 const executors = {
@@ -21,9 +21,12 @@ const executors = {
 };
 // A program declares what it uses: { "ext": { "text": ["trim"] }, … },
 // and calls it: { "call": { "text.trim": { "value": { "ref": "Name" } } } }.
-const outcome = JSON.parse(await run(programJson, '{"Name":"  Ada "}', executors, '{"maxSteps":10000}'));
-if (outcome.ok) console.log(outcome.value, outcome.variables, outcome.steps);
-else console.error(outcome.error.code, outcome.error.message, outcome.error.path);
+const program = compile(programJson, executors, '{"maxSteps":10000}'); // once…
+for (const row of rows) {
+  const outcome = JSON.parse(await program.run(row));                 // …then per row
+  if (outcome.ok) console.log(outcome.value, outcome.variables, outcome.steps);
+  else console.error(outcome.error.code, outcome.error.message, outcome.error.path);
+}
 ```
 
 In Node, `init()` can't fetch the module from a file URL, so pass its bytes:
@@ -37,7 +40,10 @@ await init({ module_or_path: await readFile(wasmPath) });
 
 ## API
 
-`run(program, variables, executors, limits) → Promise<string>`
+`compile(program, executors, limits) → Program`, then
+`program.run(variables) → Promise<string>`, as often as needed — or, for a
+program that runs once, `run(program, variables, executors, limits) →
+Promise<string>`, which compiles and runs in one go.
 
 | Argument | |
 |---|---|
@@ -46,12 +52,23 @@ await init({ module_or_path: await readFile(wasmPath) });
 | `executors` | `{ id: { name: (call) => value, … }, … }` or `null`: each executor an object of the external functions it provides, which a program declares in `ext` (`{ "text": ["trim"] }`) and calls as `text.trim`. A call is `{ op, arg?, input }` (`op` is the function's own name); return a JSON value or a promise of one. `undefined` is `null`; throwing or rejecting fails the run with `function_failed`. |
 | `limits` | JSON text like `{"maxSteps":10000,"maxDepth":64}`, or `""`. |
 
-It resolves with JSON text, `{"ok":true,"value":…,"variables":…,"steps":…}`
+A run resolves with JSON text, `{"ok":true,"value":…,"variables":…,"steps":…}`
 or `{"ok":false,"error":{"code":…,"message":…,"path":…,"tag"?:…,"issues"?:…}}`
-for any CodyScript error, including a program that isn't JSON. It rejects
-only when the arguments are wrong (variables or limits that aren't JSON, an
-executor that isn't an object of functions). Also exported: `version()` and `schema()`
-(the JSON Schema, as text).
+for any CodyScript error — with `run`, including a program that isn't
+valid or isn't JSON. It rejects only when the arguments are wrong
+(variables or limits that aren't JSON, an executor that isn't an object of
+functions).
+
+`compile` throws those: a `CodyScriptError` (an `Error` with the same
+`code`, `message`, `path`, `tag` and `issues`) for a program that isn't
+valid or isn't JSON, and a plain `Error` for wrong arguments.
+
+Compile a program once and keep the `Program` for every run: for a small
+rule, parsing and compiling cost several times what running it does. Runs
+of one `Program` don't share state and may overlap. It's freed when it's
+garbage-collected, or at once with `program.free()` (or `using`).
+
+Also exported: `version()` and `schema()` (the JSON Schema, as text).
 
 ### Debugging
 

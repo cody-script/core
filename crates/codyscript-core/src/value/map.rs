@@ -22,7 +22,10 @@ const INDEX_THRESHOLD: usize = 8;
 pub struct Map {
     entries: Vec<(String, Value)>,
     /// Key → position in `entries`; built once the map outgrows a scan.
-    index: Option<HashMap<String, usize>>,
+    /// Boxed, since most maps never need one: a `HashMap` inline would more
+    /// than double the size of a `Map`, and so of every `Value`.
+    #[allow(clippy::box_collection)]
+    index: Option<Box<HashMap<String, usize>>>,
 }
 
 impl Map {
@@ -103,8 +106,12 @@ impl Map {
     pub fn remove(&mut self, key: &str) -> Option<Value> {
         let i = self.position(key)?;
         let (_, value) = self.entries.remove(i);
-        if self.index.is_some() {
-            self.rebuild_index();
+        if let Some(index) = &mut self.index {
+            // The entries after it moved up one place.
+            index.remove(key);
+            for position in index.values_mut().filter(|p| **p > i) {
+                *position -= 1;
+            }
         }
         Some(value)
     }
@@ -122,7 +129,7 @@ impl Map {
             .enumerate()
             .map(|(i, (k, _))| (k.clone(), i))
             .collect();
-        self.index = Some(index);
+        self.index = Some(Box::new(index));
     }
 
     /// The entries, in order.
@@ -334,6 +341,22 @@ mod tests {
         assert_eq!(map.get("new"), Some(&Value::from(true)));
         map.clear();
         assert!(map.is_empty() && map.get("k1").is_none());
+    }
+
+    #[test]
+    fn removing_past_the_index_threshold_keeps_every_lookup_right() {
+        let mut map: Map = (0..20).map(|i| (format!("k{i}"), i)).collect();
+        for removed in ["k0", "k19", "k7", "k8"] {
+            assert!(map.remove(removed).is_some());
+            assert_eq!(map.get(removed), None);
+        }
+        map.insert("k7".into(), Value::from(70));
+        for (i, (key, value)) in map.iter().enumerate() {
+            assert_eq!(map.get(key), Some(value), "{key}");
+            assert_eq!(map.position(key), Some(i), "{key}");
+        }
+        assert_eq!(map.len(), 17);
+        assert_eq!(map["k7"], Value::from(70));
     }
 
     #[test]

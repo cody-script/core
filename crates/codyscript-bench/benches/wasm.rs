@@ -9,14 +9,17 @@
 #![cfg(target_arch = "wasm32")]
 
 use std::hint::black_box;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use codyscript_bench::alloc::{Counting, bytes, measure, report};
 use codyscript_bench::{self as scenario, memory_scenarios};
 use codyscript_core::CompiledProgram;
+use codyscript_json::EngineJsonExt;
 use js_sys::{Function, Object, Reflect};
 use wasm_bindgen::JsValue;
+use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::{Criterion, wasm_bindgen_bench};
 
 #[global_allocator]
@@ -97,6 +100,40 @@ fn json(c: &mut Criterion) {
     c.bench_function("json/end_to_end", |b| {
         b.iter(|| scenario::json_end_to_end(&engine, &rule_json, r#"{"Name":"  Ada Lovelace  "}"#))
     });
+    let rule = engine.compile_json(&rule_json).expect("the rule compiles");
+    c.bench_function("json/compiled_once", |b| {
+        b.iter(|| scenario::json_row(&rule, r#"{"Name":"  Ada Lovelace  "}"#))
+    });
+}
+
+/// The README rule through the JavaScript bindings, with its `text`
+/// executor in JavaScript: compiled and run for every row (`run`), or
+/// compiled once and run per row (`compile`, then `program.run`).
+#[wasm_bindgen_bench]
+async fn bindings(c: &mut Criterion) {
+    configure(c);
+    let program = scenario::readme_rule_json();
+    let row = r#"{"Name":"  Ada Lovelace  "}"#;
+    let executors = text_in_javascript();
+    let (p, e) = (program.clone(), executors.clone());
+    c.bench_async_function("wasm/readme/run", move |b| {
+        let (program, executors) = (p.clone(), e.clone());
+        Box::pin(b.iter_future(move || {
+            codyscript_wasm::run(
+                program.clone(),
+                row.into(),
+                executors.clone(),
+                String::new(),
+            )
+        }))
+    })
+    .await;
+    let compiled = Rc::new(codyscript_wasm::compile(&program, executors, "").expect("compiles"));
+    c.bench_async_function("wasm/readme/compiled_once", move |b| {
+        let compiled = Rc::clone(&compiled);
+        Box::pin(b.iter_future(move || JsFuture::from(compiled.run(row.into()))))
+    })
+    .await;
 }
 
 /// One run, `CALLS` executor calls — blocking, or awaited on the JavaScript
@@ -222,6 +259,19 @@ fn memory(_: &mut Criterion) {
 
 fn call_loop(engine: &codyscript_core::Engine) -> Arc<CompiledProgram> {
     Arc::new(scenario::compile(engine, &scenario::call_loop()))
+}
+
+/// `{ text: { trim, empty } }`: the README rule's functions.
+fn text_in_javascript() -> JsValue {
+    let text = Object::new();
+    let trim = "return String(call.input.value ?? '').trim();";
+    let empty = "return String(call.input.value ?? '').length === 0;";
+    for (name, body) in [("trim", trim), ("empty", empty)] {
+        Reflect::set(&text, &name.into(), &Function::new_with_args("call", body)).unwrap();
+    }
+    let executors = Object::new();
+    Reflect::set(&executors, &"text".into(), &text).unwrap();
+    executors.into()
 }
 
 /// `{ math: (call) => { <body> } }`.

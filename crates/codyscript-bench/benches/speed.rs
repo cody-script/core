@@ -6,6 +6,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use codyscript_bench as scenario;
+use codyscript_json::EngineJsonExt;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 /// Compiling: validation, expression parsing and building the program tree.
@@ -132,6 +133,10 @@ fn json(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("end_to_end", |b| {
         b.iter(|| scenario::json_end_to_end(&engine, black_box(&rule_json), row_json))
+    });
+    let rule = engine.compile_json(&rule_json).expect("the rule compiles");
+    group.bench_function("compiled_once", |b| {
+        b.iter(|| scenario::json_row(&rule, black_box(row_json)))
     });
     group.finish();
 }

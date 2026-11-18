@@ -982,6 +982,23 @@ mod compile {
     }
 
     #[test]
+    fn compile_owned_keeps_the_program_it_is_given() {
+        let source = m(vec![ret(x("n + 1"))]);
+        let engine = engine();
+        let compiled = engine.compile_owned(source.clone()).unwrap();
+        assert_eq!(compiled.program(), &source);
+        assert_eq!(
+            compiled_value(&compiled, with_vars(value!({ "n": 1 }))),
+            value!(2)
+        );
+        let invalid = with_ext(call("nope.x", value!({})), value!({ "nope": ["x"] }));
+        let owned = engine.compile_owned(invalid.clone()).unwrap_err();
+        let borrowed = compile_error(&engine, &invalid);
+        assert_eq!(owned.to_string(), borrowed.to_string());
+        assert_eq!(owned.issues(), borrowed.issues());
+    }
+
+    #[test]
     fn input_variables_are_copied_not_mutated() {
         let variables = vars(value!({ "a": 1 }));
         let result = engine()
