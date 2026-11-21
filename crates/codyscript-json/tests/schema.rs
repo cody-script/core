@@ -49,7 +49,7 @@ fn accepts_every_program_in_the_readmes() {
         .map(|(_, json)| json)
         .filter(|json| json.get("do").is_some() || json.get("fn").is_some())
         .collect();
-    assert_eq!(programs.len(), 3);
+    assert_eq!(programs.len(), 4);
     for program in programs {
         assert!(
             validator.is_valid(&to_serde_json(&program)),

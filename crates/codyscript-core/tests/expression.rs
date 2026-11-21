@@ -49,7 +49,7 @@ fn whole_results_are_integers() {
 
 #[test]
 fn comparisons() {
-    let vars = value!({ "a": 1, "b": 2, "s": "paid", "n": null });
+    let vars = value!({ "a": 1, "b": 2, "s": "paid", "n": null, "l": [], "o": {} });
     for (source, value) in [
         ("a < b", true),
         ("a <= 1", true),
@@ -65,6 +65,10 @@ fn comparisons() {
         ("a < b && b < 3", true),
         ("a == 1.0", true),
         ("null != false", true),
+        // Anything can be tested for null; a list or object never is.
+        ("o == null", false),
+        ("null != l", true),
+        ("o?.missing == null", true),
         // Text orders by Unicode code point.
         ("'\u{FF5E}' < '\u{1F600}'", true),
         ("'Z' < 'a'", true),
@@ -214,6 +218,7 @@ fn type_errors() {
             r#"">=" needs two numbers or two texts, got null and number"#,
         ),
         ("l == 1", r#""==" can't compare list and number"#),
+        ("l == o", r#""==" can't compare list and object"#),
         ("1 != o", r#""!=" can't compare number and object"#),
         ("1 / 0", r#""/" divided by zero"#),
         ("-1 / 0", r#""/" divided by zero"#),
@@ -281,7 +286,19 @@ fn refuses_bad_syntax_at_compile_time() {
         ("'bad\\\nescape'", r#"Unknown escape "\\n"; use"#),
         (&format!("1{}", "0".repeat(400)), "is too large"),
         ("*", r#"Unexpected "*""#),
-        ("1.", r#"Unexpected ".""#),
+        ("1.", r#"Expected a field name after ".""#),
+        ("a.", r#"Expected a field name after ".""#),
+        (
+            "a.0",
+            r#"Expected a field name after "."; for a list's item, use [0]"#,
+        ),
+        ("a.'b'", r#"Expected a field name after ".""#),
+        ("a?.", r#"Expected a field name after "?.""#),
+        ("a[0", r#"Missing "]""#),
+        ("a[]", r#"Unexpected "]""#),
+        ("a]", r#"Unexpected "]""#),
+        (".a", r#"Unexpected ".""#),
+        ("a?b", r#"Unexpected "?""#),
         ("a & b", r#"Unexpected "&""#),
     ] {
         let error = compile_error_at(source, None);
@@ -295,8 +312,141 @@ fn refuses_bad_syntax_at_compile_time() {
     }
 }
 
+fn steps(source: &str, variables: Value) -> u64 {
+    Engine::new()
+        .run_blocking(&x(source), with_vars(variables))
+        .unwrap()
+        .steps
+}
+
+#[test]
+fn fields_and_items() {
+    let vars = value!({
+        "body": {
+            "user": { "name": "Ada", "tags": ["x", "y"] },
+            "content-type": "json",
+            "null": 0,
+            "type": "t"
+        },
+        "items": [{ "price": 10 }, { "price": 20 }],
+        "grid": [[1, 2], [3, 4]],
+        "i": 1,
+        "key": "content-type"
+    });
+    for (source, value) in [
+        ("body.user.name", value!("Ada")),
+        ("body.user.tags[1]", value!("y")),
+        ("items[0].price + items[i].price", value!(30)),
+        ("items[i - 1].price * 2", value!(20)),
+        ("items[1.0].price", value!(20)),
+        ("grid[1][0]", value!(3)),
+        // An index may be any text: a name that isn't a word, or computed.
+        ("body['content-type']", value!("json")),
+        ("body[key] == 'json'", value!(true)),
+        // After `.`, any word is a field's name, keywords included.
+        ("body.null", value!(0)),
+        ("body.type", value!("t")),
+        // Reads bind tighter than any operator.
+        ("-items[1].price", value!(-20)),
+        ("!(body.user.name == 'Ada')", value!(false)),
+        ("(body).user . name", value!("Ada")),
+        ("body.user", value!({ "name": "Ada", "tags": ["x", "y"] })),
+    ] {
+        assert_eq!(eval(source, vars.clone()).unwrap(), value, "{source}");
+    }
+}
+
+#[test]
+fn optional_reads_are_null_when_missing() {
+    let vars = value!({
+        "body": { "name": "Ada", "address": null },
+        "items": [1],
+        "n": null
+    });
+    for (source, value) in [
+        ("body?.name", value!("Ada")),
+        ("body?.nickname", value!(null)),
+        ("body?.nickname ?? 'anon'", value!("anon")),
+        ("body.address?.city", value!(null)),
+        ("body?.address?.city ?? 'nowhere'", value!("nowhere")),
+        ("body?['name']", value!("Ada")),
+        ("items?[0]", value!(1)),
+        ("items?[5]", value!(null)),
+        ("n?.a", value!(null)),
+        // An optional index of `null` isn't evaluated: `missing` is never read.
+        ("n?[missing]", value!(null)),
+    ] {
+        assert_eq!(eval(source, vars.clone()).unwrap(), value, "{source}");
+    }
+}
+
+#[test]
+fn reading_what_isnt_there_is_a_type_error() {
+    let vars = value!({
+        "body": { "name": "Ada" },
+        "items": [1, 2, 3],
+        "n": null,
+        "s": "abc",
+        "num": 4
+    });
+    for (source, message) in [
+        ("body.nmae", r#"Object has no field "nmae""#),
+        ("body['nmae']", r#"Object has no field "nmae""#),
+        ("items[9]", "Index 9 is out of range for a list of 3"),
+        (
+            "items[-1]",
+            "List index must be a whole number from 0, got -1",
+        ),
+        (
+            "items[1.5]",
+            "List index must be a whole number from 0, got 1.5",
+        ),
+        ("items['0']", "List index must be a number, got string"),
+        ("body[0]", "Object key must be a string, got number"),
+        ("n.a", r#"".a" needs an object, got null"#),
+        ("num.a", r#"".a" needs an object, got number"#),
+        ("items.a", r#"".a" needs an object, got list"#),
+        ("body.name.first", r#"".first" needs an object, got string"#),
+        ("s[0]", r#""[]" needs a list or an object, got string"#),
+        ("n[0]", r#""[]" needs a list or an object, got null"#),
+        // Optional reads forgive absence, not the wrong kind of value.
+        ("num?.a", r#"".a" needs an object, got number"#),
+        (
+            "items?[1.5]",
+            "List index must be a whole number from 0, got 1.5",
+        ),
+        ("body?[0]", "Object key must be a string, got number"),
+    ] {
+        let error = eval(source, vars.clone()).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::TypeError, "{source}");
+        assert_eq!(error.message(), format!("{message} in \"{source}\" at /x"));
+    }
+}
+
+#[test]
+fn each_read_is_a_step() {
+    let vars = value!({ "o": { "a": [1] }, "n": null });
+    // The node, then `[]`, `.a`, `o` and `0`.
+    assert_eq!(steps("o.a[0]", vars.clone()), 5);
+    // The node, `?[]` and `n`: the index is never evaluated.
+    assert_eq!(steps("n?[0 + 1]", vars), 3);
+}
+
+#[test]
+fn a_long_chain_of_reads_runs_into_the_step_limit_not_the_stack() {
+    let source = format!("n{}", "?.a".repeat(100_001));
+    let error = failure(Engine::new().run_blocking(&x(&source), with_vars(value!({ "n": null }))));
+    assert_eq!(error.code(), ErrorCode::StepLimit);
+}
+
 #[test]
 fn refuses_nesting_past_max_depth_parentheses_or_operators() {
+    let indexes = format!("{}0{}", "a[".repeat(200), "]".repeat(200));
+    assert!(
+        compile_error_at(&indexes, None)
+            .message()
+            .contains("Expression nests deeper than 128 levels")
+    );
     let parens = format!("{}1{}", "(".repeat(200), ")".repeat(200));
     assert!(
         compile_error_at(&parens, None)

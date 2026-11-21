@@ -142,6 +142,14 @@ async fn functions_receive_op_arg_and_input_as_plain_objects() {
         to_json(&outcome["value"]),
         r#"{"op":"it","arg":{"cfg":true},"input":{"a":1,"b":42}}"#
     );
+    // A tagged call says which it is.
+    let echo = executors(&[("echo", &[("it", js("return call;"))])]);
+    let program = r#"{ "ext": { "echo": ["it"] }, "call": { "echo.it": {} }, "tag": "b7" }"#;
+    let outcome = run(program, "", echo, "").await;
+    assert_eq!(
+        to_json(&outcome["value"]),
+        r#"{"op":"it","input":{},"tag":"b7"}"#
+    );
 }
 
 #[wasm_bindgen_test]

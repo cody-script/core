@@ -49,7 +49,7 @@ Promise<string>`, which compiles and runs in one go.
 |---|---|
 | `program` | JSON text. |
 | `variables` | JSON text of an object, or `""`. |
-| `executors` | `{ id: { name: (call) => value, … }, … }` or `null`: each executor an object of the external functions it provides, which a program declares in `ext` (`{ "text": ["trim"] }`) and calls as `text.trim`. A call is `{ op, arg?, input }` (`op` is the function's own name); return a JSON value or a promise of one. `undefined` is `null`; throwing or rejecting fails the run with `function_failed`. |
+| `executors` | `{ id: { name: (call) => value, … }, … }` or `null`: each executor an object of the external functions it provides, which a program declares in `ext` (`{ "text": ["trim"] }`) and calls as `text.trim`. A call is `{ op, arg?, input, tag? }` (`op` is the function's own name, `tag` the calling node's); return a JSON value or a promise of one. `undefined` is `null`; throwing or rejecting fails the run with `function_failed`. |
 | `limits` | JSON text like `{"max_steps":10000,"max_depth":64}`, or `""`. |
 
 A run resolves with JSON text, `{"ok":true,"value":…,"variables":…,"steps":…}`

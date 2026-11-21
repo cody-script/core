@@ -97,6 +97,10 @@ enum Task<'p> {
     /// Run the function with the arguments on the value stack as its
     /// variables.
     Invoke(&'p Call, &'p Input),
+    /// Make an object of these fields, whose values are on the value stack.
+    Object(&'p [(Arc<str>, Input)]),
+    /// Make a list of the last this many values on the value stack.
+    Array(usize),
     /// Assign the value to this variable in the current scope.
     Assign(&'p Arc<str>),
     /// End the current block with the value.
@@ -264,6 +268,15 @@ impl<'p> Machine<'p, '_> {
                 self.values.push(result);
             }
             Task::Invoke(call, node) => self.invoke(call, node)?,
+            Task::Object(fields) => {
+                let object = self.arguments(fields);
+                self.values.push(Value::Object(object));
+            }
+            Task::Array(len) => {
+                let at = self.values.len().saturating_sub(len);
+                let items = self.values.drain(at..).collect();
+                self.values.push(Value::Array(items));
+            }
             Task::EndCall => {
                 self.scopes.truncate(self.base);
                 self.invocations.pop();
@@ -311,6 +324,21 @@ impl<'p> Machine<'p, '_> {
                 self.tasks.push(Task::Invoke(call, input));
                 for (_, argument) in call.args.iter().rev() {
                     self.tasks.push(Task::Resolve(argument));
+                }
+                return Ok(());
+            }
+            InputKind::Obj(fields) => {
+                // Like arguments: each field's value in turn, in order.
+                self.tasks.push(Task::Object(fields));
+                for (_, field) in fields.iter().rev() {
+                    self.tasks.push(Task::Resolve(field));
+                }
+                return Ok(());
+            }
+            InputKind::List(items) => {
+                self.tasks.push(Task::Array(items.len()));
+                for item in items.iter().rev() {
+                    self.tasks.push(Task::Resolve(item));
                 }
                 return Ok(());
             }
@@ -437,8 +465,8 @@ impl<'p> Machine<'p, '_> {
         {}
     }
 
-    /// The arguments on the value stack, by name, taken off it. (A call's
-    /// argument names are distinct: they're an object's keys.)
+    /// The arguments (or an `obj`'s fields) on the value stack, by name,
+    /// taken off it. (The names are distinct: they're an object's keys.)
     fn arguments(&mut self, args: &[(Arc<str>, Input)]) -> Map {
         let at = self.values.len().saturating_sub(args.len());
         let names = args.iter().map(|(name, _)| Arc::clone(name));
@@ -454,6 +482,7 @@ impl<'p> Machine<'p, '_> {
             arg: external.arg.clone(),
             input: self.arguments(&external.args),
             signal: self.meter.signal.clone(),
+            tag: external.tag.clone(),
         };
         let name = &external.name;
         external.executor.call(call).await.map_err(|error| {

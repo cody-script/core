@@ -27,6 +27,8 @@ const INPUTS: Kinds = &[
     ("x", &[]),
     ("call", &["arg"]),
     ("do", &[]),
+    ("obj", &[]),
+    ("list", &[]),
 ];
 const INSTRUCTIONS: Kinds = &[
     ("set", &[]),
@@ -354,7 +356,11 @@ impl Walk<'_> {
             self.fail(path.into(), format!("Expected {what} object"));
             return None;
         };
-        let mut types = kinds.iter().filter(|(k, _)| map.contains_key(k));
+        // A node has a key or two, fewer than there are types: look its own
+        // keys up among them.
+        let mut types = map
+            .keys()
+            .filter_map(|key| kinds.iter().find(|(k, _)| *k == key));
         let (Some(&(ty, fields)), None) = (types.next(), types.next()) else {
             let quote = |(k, _): &(&str, _)| format!("\"{k}\"");
             let expected: Vec<String> = kinds.iter().map(quote).collect();
@@ -510,6 +516,12 @@ impl Walk<'_> {
                 .map(|name| InputKind::Ref(name.to_owned())),
             "x" => self.expression(field(node, "x"), &path),
             "call" => self.call(node, &path, depth, tag.as_deref()),
+            "obj" => self
+                .fields(field(node, "obj"), &child(&path, "obj"), depth + 1)
+                .map(InputKind::Obj),
+            "list" => self
+                .items(field(node, "list"), &child(&path, "list"), depth + 1)
+                .map(InputKind::List),
             _ => self
                 .block(field(node, "do"), &child(&path, "do"), depth + 1)
                 .map(InputKind::Do),
@@ -575,6 +587,7 @@ impl Walk<'_> {
                     name,
                     args,
                     arg: arg.cloned().map(Arc::new),
+                    tag: tag.map(Arc::from),
                 }))
             }
         })
@@ -625,6 +638,41 @@ impl Walk<'_> {
             let input = self.input(from, arg_path, depth + 1);
             match (input, list.as_mut()) {
                 (Some(input), Some(list)) => list.push((arg.into(), input)),
+                _ => list = None,
+            }
+        }
+        list
+    }
+
+    /// `obj`'s fields, `{ <name>: <input>, … }`, in order. Unlike
+    /// arguments, they aren't variables: any name will do, even `""`.
+    fn fields(&mut self, v: &Value, at: &str, depth: usize) -> Option<Vec<(Arc<str>, Input)>> {
+        let map = self.record(v, at, depth, None)?;
+        let mut list = Some(Vec::with_capacity(map.len()));
+        for (name, from) in map {
+            let input = self.input(from, child(at, name), depth + 1);
+            match (input, list.as_mut()) {
+                (Some(input), Some(list)) => list.push((name.into(), input)),
+                _ => list = None,
+            }
+        }
+        list
+    }
+
+    /// `list`'s items, `[<input>, …]`, in order.
+    fn items(&mut self, v: &Value, at: &str, depth: usize) -> Option<Vec<Input>> {
+        let Value::Array(items) = v else {
+            self.fail(at.into(), "Expected a list of inputs");
+            return None;
+        };
+        if !self.container(at, depth) {
+            return None;
+        }
+        let mut list = Some(Vec::with_capacity(items.len()));
+        for (i, item) in items.iter().enumerate() {
+            let input = self.input(item, child_at(at, i), depth + 1);
+            match (input, list.as_mut()) {
+                (Some(input), Some(list)) => list.push(input),
                 _ => list = None,
             }
         }

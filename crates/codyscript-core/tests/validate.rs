@@ -49,11 +49,11 @@ fn messages_say_what_is_wrong() {
     let cases = [
         (
             value!({ "rf": "x" }),
-            r#"Invalid program: Expected an input with exactly one of "val", "ref", "x", "call", "do""#,
+            r#"Invalid program: Expected an input with exactly one of "val", "ref", "x", "call", "do", "obj", "list""#,
         ),
         (
             value!({ "ref": "a", "val": 1 }),
-            r#"Invalid program: Expected an input with exactly one of "val", "ref", "x", "call", "do", found "val" and "ref""#,
+            r#"Invalid program: Expected an input with exactly one of "val", "ref", "x", "call", "do", "obj", "list", found "val" and "ref""#,
         ),
         (
             m(vec![value!(1)]),
@@ -67,6 +67,14 @@ fn messages_say_what_is_wrong() {
         (
             value!({ "call": {} }),
             "Invalid program: Expected exactly one key, found 0 at /call",
+        ),
+        (
+            value!({ "obj": [] }),
+            "Invalid program: Expected an object at /obj",
+        ),
+        (
+            value!({ "list": {} }),
+            "Invalid program: Expected a list of inputs at /list",
         ),
         (
             m(vec![value!({ "if": 1 })]),

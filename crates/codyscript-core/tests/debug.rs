@@ -839,6 +839,43 @@ mod steps {
     }
 
     #[test]
+    fn obj_and_list_are_steps_and_so_is_each_part_in_order() {
+        let program = compile(&m(vec![ret(value!({ "obj": {
+            "a": 1,
+            "b": { "list": [{ "ref": "x" }, 2] }
+        } }))]));
+        let listed: Vec<_> = program
+            .steps()
+            .iter()
+            .map(|s| (s.path, s.kind, s.depth))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("/do/0", NodeKind::Ret, 0),
+                ("/do/0/ret", NodeKind::Obj, 1),
+                ("/do/0/ret/obj/a", NodeKind::Val, 2),
+                ("/do/0/ret/obj/b", NodeKind::List, 2),
+                ("/do/0/ret/obj/b/list/0", NodeKind::Ref, 3),
+                ("/do/0/ret/obj/b/list/1", NodeKind::Val, 3),
+            ]
+        );
+        assert_eq!(NodeKind::Obj.as_str(), "obj");
+        assert_eq!(NodeKind::List.to_string(), "list");
+
+        // Stepping into goes through each in that order; stepping over the
+        // list skips its items.
+        let into = [StepInto; 6];
+        let (log, outcome) = debug(&program, value!({ "x": 5 }), &["/do/0"], &into);
+        let listed_paths: Vec<_> = listed.iter().map(|(path, ..)| *path).collect();
+        assert_eq!(paths(&log), listed_paths);
+        assert_eq!(outcome.unwrap().value, value!({ "a": 1, "b": [5, 2] }));
+        let over = [StepOver, StepOver];
+        let (log, _) = debug(&program, value!({ "x": 5 }), &["/do/0/ret/obj/a"], &over);
+        assert_eq!(paths(&log), ["/do/0/ret/obj/a", "/do/0/ret/obj/b"]);
+    }
+
+    #[test]
     fn a_program_of_one_value_is_one_step() {
         let program = compile(&value!(1));
         let steps = program.steps();

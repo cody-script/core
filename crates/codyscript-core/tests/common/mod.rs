@@ -331,6 +331,19 @@ pub fn valid() -> Vec<(&'static str, Value)> {
             ),
         ),
         (
+            "objects and lists built from inputs, tagged",
+            value!({
+                "obj": {
+                    "a": 1,
+                    "b": { "ref": "x", "tag": "r" },
+                    "tag": { "list": [1, { "x": "x.y?[0]" }, { "obj": {} }], "tag": "l" },
+                    "": { "val": [1] }
+                },
+                "tag": "o"
+            }),
+        ),
+        ("an empty list", value!({ "list": [] })),
+        (
             "every root field, on an expression",
             value!({ "ext": { "math": ["add"] }, "fn": { "f": 1 }, "x": "1", "tag": "t" }),
         ),
@@ -461,6 +474,28 @@ pub fn invalid() -> Vec<(&'static str, Value, &'static str)> {
             "an empty argument name",
             with_fn(call("f", value!({ "": 1 })), [("f", value!(1))]),
             "/call/f/",
+        ),
+        ("obj that isn't an object", value!({ "obj": [] }), "/obj"),
+        (
+            "a field that isn't an input",
+            value!({ "obj": { "a": [1] } }),
+            "/obj/a",
+        ),
+        ("list that isn't a list", value!({ "list": {} }), "/list"),
+        (
+            "an item that isn't an input",
+            value!({ "list": [1, { "do": 1 }] }),
+            "/list/1/do",
+        ),
+        (
+            "obj with an extra field",
+            value!({ "obj": {}, "arg": 1 }),
+            "/arg",
+        ),
+        (
+            "obj and list in one node",
+            value!({ "obj": {}, "list": [] }),
+            "",
         ),
         // The root's `fn` and `ext`.
         (

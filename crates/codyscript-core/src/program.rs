@@ -50,6 +50,10 @@ pub(crate) enum InputKind {
     Call(Call),
     /// `do`: a block with its own scope.
     Do(Vec<Instruction>),
+    /// `obj`: an object of the fields' values, in order.
+    Obj(Vec<(Arc<str>, Input)>),
+    /// `list`: a list of the items' values, in order.
+    List(Vec<Input>),
 }
 
 #[derive(Clone)]
@@ -65,6 +69,8 @@ pub(crate) struct External {
     pub args: Vec<(Arc<str>, Input)>,
     /// The static `arg`, passed as written: shared with every call.
     pub arg: Option<Arc<Value>>,
+    /// The call node's tag, for the executor: shared with every call.
+    pub tag: Option<Arc<str>>,
 }
 
 impl fmt::Debug for External {
@@ -73,6 +79,7 @@ impl fmt::Debug for External {
             .field("name", &self.name)
             .field("args", &self.args)
             .field("arg", &self.arg)
+            .field("tag", &self.tag)
             .finish_non_exhaustive()
     }
 }

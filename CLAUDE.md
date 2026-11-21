@@ -63,7 +63,7 @@ crates/
                      #   Program is its body and its `fn` functions; a call
                      #   is resolved to an External or a function index
       expression.rs  # The `x` language: tokenizer, parser, evaluator
-      executor.rs    # Executor trait, ExecutorCall (op/arg shared with the
+      executor.rs    # Executor trait, ExecutorCall (op/arg/tag shared with the
                      #   tree), ExecutorFuture (no box for a sync result),
                      #   Signal, closure adapters
                      #   (engine.rs registers each with its function names)
@@ -83,6 +83,12 @@ crates/
     tests/           # json.rs (conventions), schema.rs, readme.rs;
                      #   scratch.rs: paste a program, debug the core
                      #   natively (RustRover), or trace a run (TRACE)
+  codyscript-text/   # An executor crate: text functions (trim, split, …);
+                     #   not published yet. Depends on core only.
+    src/lib.rs       # FUNCTIONS, `text` (fn(ExecutorCall) -> ExecutorResult),
+                     #   strict argument checks (Args)
+    README.md        # the functions, and how to write an executor crate
+    tests/text.rs    # every function, from programs; argument errors
   codyscript-wasm/   # WebAssembly bindings (wasm-bindgen); not published.
     src/lib.rs       # compile(program, executors, limits) → Program, and
                      #   run(program, variables, executors, limits), for
@@ -120,7 +126,10 @@ the reverse. A new format is a new adapter crate beside `codyscript-json` —
 or nothing at all, since any serde format already reads and writes `Value`.
 If a change to the core needs a format, the design is wrong: move that part
 to an adapter. JSON-specific things (the schema, `serde_json` errors and
-interop, recursion limits) live in `codyscript-json`.
+interop, recursion limits) live in `codyscript-json`. Executor crates (like
+`codyscript-text`) depend on the core alone too: they export their
+functions' names and an executor, and the host picks the id; they check
+arguments strictly and never panic (programs are untrusted).
 
 Other constraints: no async runtime dependency (`run` is a plain future;
 `run_blocking` uses a std-only `block_on`); `#![forbid(unsafe_code)]`.
@@ -227,8 +236,13 @@ closures already work with `async_executor`.
   with a repeated key is an error, in every format (`MapVisitor`). Its
   keys are `Arc<str>`: the program's names (`set`, arguments) are shared
   into scopes and calls, never copied — keep it that way on hot paths.
-- **Expressions stay small**: arithmetic, comparison, logic and `??`; no
-  calls, assignment or loops. Strict types (`1 + 'a'` is a `type_error`),
+- **Expressions stay small**: arithmetic, comparison, logic, `??`, and
+  reads (`a.b`, `a[i]`; `?.`/`?[` for what may be missing — a missing
+  field or item is otherwise a `type_error`, as `map[k]` panics where
+  `map.get(k)` gives `None`); no calls, assignment or loops. Reads borrow
+  from the scope, so only the final result is copied. Building data is
+  `obj`/`list` (inputs inside), not expression syntax; `val` stays the
+  constant form. Strict types (`1 + 'a'` is a `type_error`),
   strict booleans (no truthiness: `if`/`for` tests, `!`, `&&`, `||` take
   only booleans). `null` is CodyScript's `None`: unusable except by `==`,
   `??` (`unwrap_or`) and passing it on. Numbers are f64; whole results

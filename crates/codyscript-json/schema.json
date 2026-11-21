@@ -59,6 +59,12 @@
 				},
 				{
 					"$ref": "#/$defs/block"
+				},
+				{
+					"$ref": "#/$defs/obj"
+				},
+				{
+					"$ref": "#/$defs/list"
 				}
 			]
 		},
@@ -174,7 +180,7 @@
 			}
 		},
 		"x": {
-			"description": "An expression over variables: numbers, 'text', true, false, null, names, + - * /, parentheses, one comparison (== != < <= > >=), && || and !. Syntax is checked by compile().",
+			"description": "An expression over variables: numbers, 'text', true, false, null, names, fields and items (a.b, a[0], a['b'], and a?.b, a?[0] for ones that may be missing), + - * /, parentheses, one comparison (== != < <= > >=), && || and ! (on booleans), and ?? (a default for null). Syntax is checked by compile().",
 			"type": "object",
 			"required": [
 				"x"
@@ -238,6 +244,42 @@
 				}
 			}
 		},
+		"obj": {
+			"description": "Builds an object: each field's value is an input, resolved in order. (For a constant object, use val.)",
+			"type": "object",
+			"required": [
+				"obj"
+			],
+			"properties": {
+				"obj": {
+					"type": "object",
+					"additionalProperties": {
+						"$ref": "#/$defs/input"
+					}
+				},
+				"tag": {
+					"$ref": "#/$defs/tag"
+				}
+			}
+		},
+		"list": {
+			"description": "Builds a list: each item is an input, resolved in order. (For a constant list, use val.)",
+			"type": "object",
+			"required": [
+				"list"
+			],
+			"properties": {
+				"list": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/input"
+					}
+				},
+				"tag": {
+					"$ref": "#/$defs/tag"
+				}
+			}
+		},
 		"set": {
 			"description": "Assigns one variable in the current scope: { \"set\": { \"<name>\": <input> } }.",
 			"type": "object",
@@ -279,7 +321,7 @@
 			}
 		},
 		"if": {
-			"description": "Runs do when the test is truthy, otherwise el.",
+			"description": "Runs do when the test is true, otherwise el. The test must be a boolean.",
 			"type": "object",
 			"required": [
 				"if",
@@ -302,7 +344,7 @@
 			}
 		},
 		"for": {
-			"description": "Runs do while the test is truthy.",
+			"description": "Runs do while the test is true. The test must be a boolean.",
 			"type": "object",
 			"required": [
 				"for",
