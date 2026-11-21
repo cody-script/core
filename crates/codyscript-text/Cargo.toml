@@ -1,0 +1,20 @@
+[package]
+name = "codyscript-text"
+description = "Text functions for CodyScript programs: an executor of basic string functions, and an example of writing one."
+keywords = ["interpreter", "sandbox", "rules", "dsl", "string"]
+categories = ["text-processing"]
+readme = "README.md"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+codyscript-core.workspace = true
+
+[dev-dependencies]
+codyscript-json.workspace = true

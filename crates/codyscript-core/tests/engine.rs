@@ -272,6 +272,27 @@ mod external_functions {
     }
 
     #[test]
+    fn an_executor_sees_the_calling_nodes_tag() {
+        let engine = Engine::builder()
+            .executor("who", ["am"], |call| {
+                Ok(call.tag().map_or(Value::Null, Value::from))
+            })
+            .build();
+        let program = with_ext(
+            m(vec![
+                set("a", tagged(call("who.am", value!({})), "b1")),
+                set("b", call("who.am", value!({}))),
+            ]),
+            value!({ "who": ["am"] }),
+        );
+        let result = run(&engine, &program).unwrap();
+        assert_eq!(result.variables.get("a"), Some(&value!("b1")));
+        assert_eq!(result.variables.get("b"), Some(&Value::Null));
+        let call = ExecutorCall::new("am", codyscript_core::Map::new()).with_tag("t");
+        assert_eq!(call.tag(), Some("t"));
+    }
+
+    #[test]
     fn a_string_error_is_reported_too() {
         let engine = Engine::builder()
             .async_executor("bad", ["go"], |_| async { Err("nope".into()) })
@@ -290,6 +311,121 @@ mod external_functions {
         assert!(!engine.has_function("exe.old"));
         let program = with_ext(call("exe.new", value!({})), value!({ "exe": ["new"] }));
         assert_eq!(run(&engine, &program).unwrap().value, value!("new"));
+    }
+}
+
+mod objects_and_lists {
+    use super::*;
+
+    #[test]
+    fn obj_and_list_build_values_from_inputs() {
+        let program = m(vec![
+            set("n", value!(2)),
+            ret(value!({ "obj": {
+                "n": { "ref": "n" },
+                "double": { "x": "n * 2" },
+                "tags": { "list": ["a", { "x": "n > 1" }, { "val": [1] }, { "obj": {} }] },
+                "": null
+            } })),
+        ]);
+        assert_eq!(
+            run(&engine(), &program).unwrap().value,
+            value!({ "n": 2, "double": 4, "tags": ["a", true, [1], {}], "": null })
+        );
+        assert_eq!(
+            run(&engine(), &value!({ "list": [] })).unwrap().value,
+            value!([])
+        );
+    }
+
+    #[test]
+    fn inside_obj_and_list_every_value_is_an_input_and_inside_val_none_is() {
+        let vars = || with_vars(value!({ "a": 1 }));
+        let built = value!({ "obj": { "k": { "ref": "a" } } });
+        let constant = value!({ "val": { "k": { "ref": "a" } } });
+        let engine = engine();
+        assert_eq!(
+            engine.run_blocking(&built, vars()).unwrap().value,
+            value!({ "k": 1 })
+        );
+        assert_eq!(
+            engine.run_blocking(&constant, vars()).unwrap().value,
+            value!({ "k": { "ref": "a" } })
+        );
+    }
+
+    #[test]
+    fn parts_resolve_one_at_a_time_in_order_and_keep_it() {
+        let log = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen = Arc::clone(&log);
+        let engine = Engine::builder()
+            .executor("log", ["x"], move |call| {
+                let arg = call.arg().cloned().unwrap_or_default();
+                seen.lock().unwrap().push(arg.clone());
+                Ok(arg)
+            })
+            .build();
+        let logged = |v: Value| call_with("log.x", value!({}), v);
+        let program = with_ext(
+            value!({ "list": [
+                { "obj": { "z": (logged(value!(1))), "a": (logged(value!(2))) } },
+                (logged(value!(3)))
+            ] }),
+            value!({ "log": ["x"] }),
+        );
+        let value = run(&engine, &program).unwrap().value;
+        assert_eq!(value, value!([{ "z": 1, "a": 2 }, 3]));
+        assert_eq!(keys(&value[0]), ["z", "a"]);
+        assert_eq!(*log.lock().unwrap(), [value!(1), value!(2), value!(3)]);
+    }
+
+    #[test]
+    fn the_node_and_each_part_is_a_step() {
+        // obj, a, b's list, and its two items.
+        let program = value!({ "obj": { "a": 1, "b": { "list": [1, 2] } } });
+        assert_eq!(run(&engine(), &program).unwrap().steps, 5);
+    }
+
+    #[test]
+    fn a_failing_part_fails_at_its_path() {
+        let program = value!({ "obj": { "a": { "list": [1, { "ref": "nope", "tag": "t" }] } } });
+        let error = failure(run(&engine(), &program));
+        assert_eq!(error.code(), ErrorCode::UndefinedVariable);
+        assert_eq!(error.path(), "/obj/a/list/1");
+        assert_eq!(error.tag(), Some("t"));
+    }
+
+    #[test]
+    fn an_api_style_program_reads_a_request_and_builds_a_response() {
+        let request = value!({
+            "method": "POST",
+            "body": { "user": { "name": "Ada" }, "items": [{ "price": 10 }, { "price": 5 }] }
+        });
+        let program = m(vec![
+            when(
+                x("request.body?.user?.name == null"),
+                vec![ret(
+                    value!({ "obj": { "status": 400, "error": "name is required" } }),
+                )],
+                None,
+            ),
+            ret(value!({ "obj": {
+                "status": 200,
+                "body": { "obj": {
+                    "greeting": { "x": "request.body.user.name" },
+                    "total": { "x": "request.body.items[0].price + request.body.items[1].price" },
+                    "nickname": { "x": "request.body.user?.nickname ?? 'none'" }
+                } }
+            } })),
+        ]);
+        let compiled = engine().compile(&program).unwrap();
+        let ok = compiled.run_blocking(with_vars(value!({ "request": request })));
+        assert_eq!(
+            ok.unwrap().value,
+            value!({ "status": 200, "body": { "greeting": "Ada", "total": 15, "nickname": "none" } })
+        );
+        let bad = compiled.run_blocking(with_vars(value!({ "request": { "body": {} } })));
+        assert_eq!(bad.unwrap().value["status"], value!(400));
     }
 }
 
@@ -1235,6 +1371,14 @@ mod stack {
             }
             let calls = uses_math(calls);
             assert_eq!(run(&engine(), &calls).unwrap().value, value!(43));
+
+            let (mut objects, mut lists) = (value!(1), value!(1));
+            for _ in 0..64 {
+                objects = obj([("obj", obj([("a", objects)]))]);
+                lists = obj([("list", Value::Array(vec![lists]))]);
+            }
+            assert!(run(&engine(), &objects).is_ok());
+            assert!(run(&engine(), &lists).is_ok());
 
             // Calls nest on the machine's own stacks, not the thread's.
             let countdown = with_fn(

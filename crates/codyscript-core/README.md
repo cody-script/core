@@ -51,8 +51,10 @@ error rather than ignored.
 **Where a node sits decides what it is.** In an input position, an object or
 list is always a node — only numbers, strings, booleans and `null` stand for
 themselves — so a constant object is wrapped in `val`, and nothing inside
-`val` is read as a node. An input has exactly one of `val`, `ref`, `x`,
-`call`, `do`; an instruction exactly one of `set`, `ret`, `if`, `for`.
+`val` is read as a node; to build one from computed values, use `obj` or
+`list`, inside which every value is an input. An input has exactly one of
+`val`, `ref`, `x`, `call`, `do`, `obj`, `list`; an instruction exactly one
+of `set`, `ret`, `if`, `for`.
 
 **A program is an input** — usually a block — and what it produces is the
 run's value. Its root node may also carry two fields, and only it: `fn`,
@@ -69,6 +71,23 @@ functions it uses from the host ([Functions](#functions)).
 | `x` | `{ "x": "amount * 0.03" }` | An expression over variables (below). |
 | `call` | `{ "call": { "text.trim": { <arg>: <input>, … } }, "arg"?: <any> }` | Calls a [function](#functions); its value is what the function returns. |
 | `do` | `{ "do": [<instruction>…] }` | A block: runs in a new scope; its value is what it `ret`urns, else `null`. |
+| `obj` | `{ "obj": { "name": <input>, … } }` | An object of the inputs' values, keys in the order written. |
+| `list` | `{ "list": [<input>…] }` | A list of the inputs' values. |
+
+**Building data.** `val` is a constant: `{ "val": { "status": 200 } }` is
+that object, and nothing inside it is read. `obj` and `list` build from
+inputs — literals, variables, expressions, calls, other `obj`s: their
+parts are resolved one at a time, in the order written, like a call's
+arguments.
+
+```json
+{ "obj": {
+    "status": 200,
+    "name": { "x": "request.body.name" },
+    "tags": { "list": ["new", { "ref": "kind" }] },
+    "meta": { "val": { "version": 1 } }
+} }
+```
 
 **Calls.** `call` has exactly one key, the function's name, whose value
 names its arguments: `{ "call": { "text.trim": { "value": … } } }`, or
@@ -94,13 +113,15 @@ implement the same way, in a fraction of the bytes:
 | | |
 |---|---|
 | Values | numbers (`2`, `0.03`), text in single quotes (`'paid'`, `'it\'s'`; escapes `\n`, `\t`, `\\`, `\'`), `true`, `false`, `null`, variable names (`gross_sales`) |
+| Fields and items | `body.user.name`; `items[0]`, a list's item by a whole number from 0; `headers['content-type']` or `prices[product]`, an object's field by text. Missing is an error; `?.` and `?[` read what may be missing: `body?.nickname`, `items?[9]` are `null` if it is, or if the value read from is `null` |
 | Arithmetic | `+ - * /`, unary `-`, parentheses — numbers only |
-| Comparison | `== !=` (numbers, text, booleans, `null`; strict, so `1 == '1'` is false); `< <= > >=` (two numbers or two texts). One per level: `a < b < c` is refused — write `a < b && b < c` |
+| Comparison | `== !=` (numbers, text, booleans, `null`; strict, so `1 == '1'` is false; anything, a list or object included, against `null`); `< <= > >=` (two numbers or two texts). One per level: `a < b < c` is refused — write `a < b && b < c` |
 | Logic | `&&`, `\|\|` and `!`, on booleans only; `&&` and `\|\|` short-circuit |
 | Default | `??`: the left side unless it's `null`, else the right (`discount ?? 0`), like Rust's `Option::unwrap_or`; the right side is evaluated only when needed |
 
 Precedence, loosest first: `??`, `||`, `&&`, comparisons, `+ -`, `* /`,
-unary.
+unary, then reads (`-a.b` is `-(a.b)`). After `.`, any word is a field's
+name, keywords included (`response.type`, `flags.null`).
 Expressions don't call functions: for text, dates and everything else, use
 `call`.
 
@@ -108,8 +129,25 @@ Expressions are parsed when the program is compiled, so a syntax error is an
 `invalid_program` at that node's `/x`. Running one never re-parses it, never
 evaluates anything as code, and counts a step per operator and operand.
 Mixing types (`1 + 'a'`, `'a' < 1`, `!0`, `1 && true`), comparing a list
-or object, or dividing by zero is a `type_error` naming the operator and the
-expression.
+or object with anything but `null`, or dividing by zero is a `type_error` naming the operator and the
+expression. So is reading what isn't there — `Object has no field "nmae"`,
+`Index 9 is out of range for a list of 3` — or reading from the wrong kind
+of value (`".name" needs an object, got number`, `items[1.5]`, `'abc'[0]`:
+text has no items). `?.` and `?[` forgive only absence: `n?.a` of a
+number `n` is still an error. Each read is a step, like an operator.
+
+A request handler — the host passes the request in as a variable:
+
+```json
+{ "do": [
+    { "if": { "x": "request.body?.email == null" },
+      "do": [{ "ret": { "obj": { "status": 400, "error": "email is required" } } }] },
+    { "ret": { "obj": {
+        "status": 200,
+        "total": { "x": "request.body.items[0].price * (request.body?.quantity ?? 1)" }
+    } } }
+] }
+```
 
 A fuller example — a 3% fee on a CSV `Amount`, capped at 300:
 
@@ -205,11 +243,14 @@ side at the program's root:
   `||` take only `true` or `false`. There's no truthiness — `if amount` with
   `amount` a number is a `type_error`; write `if amount > 0`.
 - **`null` is CodyScript's `None`**: the value for "nothing" (a block that
-  doesn't `ret`, an executor with nothing to return, a missing field in
-  data — `Option::None` is what serde writes as `null`). Like `None`, it
-  can't be used as anything else: arithmetic, ordering and logic on it are
-  `type_error`s. Test for it with `== null`, replace it with `??`, or pass
-  it on. A variable that doesn't exist is an error, not `null`.
+  doesn't `ret`, an executor with nothing to return, an optional read of
+  what isn't there — `Option::None` is what serde writes as `null`). Like
+  `None`, it can't be used as anything else: arithmetic, ordering, logic and
+  reads on it are `type_error`s. Test for it with `== null` (any value can
+  be: a list or object is never `null`), replace it with
+  `??`, or pass it on. A variable that doesn't exist is an error, not
+  `null`, and so is a field or item that doesn't, unless it's read with `?.`
+  or `?[` — as Rust's `map[k]` panics where `map.get(k)` gives `None`.
 - **Scope**: a nested block reads its enclosing variables, but `set` inside it
   assigns its own — nothing leaks out, and its `ret` returns only from it. A
   top-level block runs in the root scope, so its assignments are returned as
@@ -278,7 +319,8 @@ RunResult { value: Value, variables: Map, steps: u64 }
   program declares in `ext` against that list. A call of one reaches the
   executor as an `ExecutorCall`: `call.op()` is which of its functions
   (`"trim"`), `call.arg()` the program's `arg`, `call.input` the resolved
-  arguments, `call.signal()` the run's signal. The function's name and
+  arguments, `call.signal()` the run's signal, and `call.tag()` the `call`
+  node's tag — which call it is, for a host tracing its functions' work. The function's name and
   `arg` are shared with the compiled program, not copied for each call. It
   returns `Result<Value, BoxError>` (`Value::Null` for nothing), directly
   or from a `Send` future. A custom `Executor` returns an `ExecutorFuture`:
@@ -357,7 +399,8 @@ person behind it — which pauses it at breakpoints, shows its variables, and
 steps on. It's all in the [`debug`] module.
 
 - **A step is a node**: an instruction (`set`, `ret`, `if`, `for`), or an
-  input (a literal, `val`, `ref`, `x`, `call`, or a `do` block) — the nodes
+  input (a literal, `val`, `ref`, `x`, `call`, a `do` block, `obj` or
+  `list`) — the nodes
   a run counts as steps. (Operands inside an expression count as steps
   too, but run as part of their `x`: a run never pauses between them.) A
   step is named by its path, as in errors (`/do/1`, `/fn/fee/do/0/set/fee`),
@@ -501,6 +544,38 @@ Debugging changes none of this: a debugged run has the same limits, and a
 CodyScript began as a port of the TypeScript package `@cody-script/core`;
 since 0.9 it no longer follows it (see below), and earlier notes mention it
 for history only.
+
+### 0.10 → 0.11 (reading and building data)
+
+Programs can now read into objects and lists, build them from computed
+values, and test any value for `null`. Every 0.10 program means what it
+did, with the same results and steps; only programs 0.10 refused change —
+two messages, and `==`/`!=` between a list or object and `null`, which now
+work. What's new:
+
+- **Fields and items in expressions**: `body.user.name`, `items[0]`,
+  `headers['content-type']`; `?.` and `?[` give `null` for what may be
+  missing (`body?.nickname ?? 'anon'`). Reading a missing field or item, or
+  from the wrong kind of value, is a `type_error` — no new error code. See
+  [Expressions](#expressions).
+- **`obj` and `list` inputs** build an object or a list whose values are
+  inputs, resolved in order: `{ "obj": { "total": { "x": "a + b" } } }`.
+  Each is a step, and so is each of its parts.
+- **Testing anything for `null`**: `row == null` and `items != null`
+  work whatever the other side holds — a list or object is never `null`,
+  as any `Option` compares with `None`. 0.10 refused them (`"==" can't
+  compare object and null`); comparing a list or object with anything
+  else is still a `type_error`.
+- **Messages**: an input with no type key (or several) now lists `"obj"`
+  and `"list"` among the types expected; `1.` in an expression is
+  `Expected a field name after "."` rather than `Unexpected "."`.
+- **Executors see which call is calling**: `ExecutorCall::tag()` is the
+  `call` node's `tag`, shared with the program like `op` (and `tag` in
+  JavaScript's call object), so a host can trace its functions' work back
+  to the node — an editor's block — that asked for it.
+- **Rust**: `debug::NodeKind` has two new variants, `Obj` and `List`
+  (`"obj"`, `"list"`): a `match` on it without a wildcard arm needs them.
+- **The schema** (`codyscript-json`) defines `obj` and `list`.
 
 ### 0.9 → 0.10 (faster compiling and calls; API changes)
 

@@ -91,6 +91,49 @@ fn cases() -> Vec<Case> {
             { "ret": { "x": "n + rest" } }
         ] }
     } });
+    // An API handler: the request in, a response (status, headers, body) out.
+    let greet = value!({ "ext": { "text": ["trim", "empty"] }, "do": [
+        { "set": { "name": { "call": { "text.trim": { "value": { "x": "request.query?.name ?? ''" } } } } } },
+        { "if": { "call": { "text.empty": { "value": { "ref": "name" } } } }, "do": [
+            { "ret": { "obj": {
+                "status": 400,
+                "body": { "obj": { "error": "name is required", "field": "query.name" } }
+            } } }
+        ], "tag": "no-name" },
+        { "ret": { "obj": {
+            "status": 200,
+            "headers": { "val": { "content-type": "application/json" } },
+            "body": { "obj": {
+                "name": { "ref": "name" },
+                "language": { "x": "request.headers?['accept-language'] ?? 'en'" }
+            } }
+        } } }
+    ] });
+    // A loop over a list's items: `?[i]` is null past the end (and `?.` of
+    // null is null; objects themselves don't compare).
+    let order_total = value!({ "do": [
+        { "set": { "i": 0 } }, { "set": { "subtotal": 0 } },
+        { "for": { "x": "order.lines?[i]?.sku != null" }, "do": [
+            { "set": { "subtotal": { "x": "subtotal + order.lines[i].price * order.lines[i].qty" } } },
+            { "set": { "i": { "x": "i + 1" } } }
+        ] },
+        { "set": { "shipping": 5 } },
+        { "if": { "x": "subtotal >= 50" }, "do": [{ "set": { "shipping": 0 } }] },
+        { "ret": { "obj": {
+            "customer": { "x": "order.customer.name" },
+            "skus": { "list": [{ "x": "order.lines[0].sku" }, { "x": "order.lines?[1]?.sku" }] },
+            "lines": { "ref": "i" },
+            "subtotal": { "ref": "subtotal" },
+            "shipping": { "ref": "shipping" },
+            "total": { "x": "subtotal + shipping" }
+        } } }
+    ] });
+    let order =
+        |lines: Value| value!({ "order": { "customer": { "name": "Ada" }, "lines": lines } });
+    let profile = value!({ "do": [{ "ret": { "obj": {
+        "name": { "x": "user.name" },
+        "tags": { "list": [{ "ref": "first" }, { "ref": "second" }] }
+    } } }] });
 
     vec![
         // Programs, functions and expressions.
@@ -110,6 +153,59 @@ fn cases() -> Vec<Case> {
         case("Expressions: a default for null, and logic on booleans", &value!({ "x": "(maybe ?? 0) + (a + 2) * 3 / 4 > 1 && ok" }))
             .variables(value!({ "maybe": null, "a": 2, "ok": true }))
             .returns(value!(true)),
+        case("Data: read fields and items, build an object and a list", &value!({ "obj": {
+            "name": { "x": "request.body.user.name" },
+            "nickname": { "x": "request.body.user?.nickname ?? 'none'" },
+            "items": { "list": [{ "x": "request.body.items[1]" }, { "x": "request.body.items?[9]" }] }
+        } }))
+            .variables(value!({ "request": { "body": { "user": { "name": "Ada" }, "items": [1, 2] } } }))
+            .returns(value!({ "name": "Ada", "nickname": "none", "items": [2, null] })),
+        case("Data: an API handler answers with a status, headers and a body", &greet)
+            .variables(value!({ "request": {
+                "method": "GET", "query": { "name": "  Ada " }, "headers": { "accept-language": "fr" }
+            } }))
+            .returns(value!({
+                "status": 200,
+                "headers": { "content-type": "application/json" },
+                "body": { "name": "Ada", "language": "fr" }
+            })),
+        case("Data: the API handler answers 400 when a field is missing", &greet)
+            .variables(value!({ "request": { "method": "GET", "query": {}, "headers": {} } }))
+            .returns(value!({ "status": 400, "body": { "error": "name is required", "field": "query.name" } })),
+        case("Data: a loop totals an order's lines, to the end of the list", &order_total)
+            .variables(order(value!([
+                { "sku": "pen", "price": 1.5, "qty": 4 },
+                { "sku": "pad", "price": 12, "qty": 2 },
+                { "sku": "ink", "price": 20, "qty": 1 }
+            ])))
+            .returns(value!({
+                "customer": "Ada", "skus": ["pen", "pad"], "lines": 3, "subtotal": 50, "shipping": 0, "total": 50
+            })),
+        case("Data: the same order with one line: ?[1]?.sku is null", &order_total)
+            .variables(order(value!([{ "sku": "pen", "price": 1.5, "qty": 4 }])))
+            .returns(value!({
+                "customer": "Ada", "skus": ["pen", null], "lines": 1, "subtotal": 6, "shipping": 5, "total": 11
+            })),
+        case("Data: a computed key looks a name up; ?[ for one that may be missing", &value!({ "list": [
+            { "x": "prices[first]" },
+            { "x": "prices?[second] ?? 0" }
+        ] }))
+            .variables(value!({ "prices": { "tea": 3, "cake": 4.5 }, "first": "cake", "second": "scone" }))
+            .returns(value!([4.5, 0])),
+        case("Data: val is a constant; obj works out its fields", &value!({ "list": [
+            { "val": { "sum": { "x": "1 + 1" } } },
+            { "obj": { "sum": { "x": "1 + 1" } } }
+        ] }))
+            .returns(value!([{ "sum": { "x": "1 + 1" } }, { "sum": 2 }])),
+        case("Data: a CodyScript function returns an object", &value!({
+            "fn": { "size": { "obj": { "width": { "ref": "width" }, "height": { "ref": "height" } } } },
+            "list": [
+                { "call": { "size": { "width": { "x": "image.width" }, "height": { "x": "image.height" } } } },
+                { "call": { "size": { "width": { "x": "image.width / 2" }, "height": { "x": "image.height / 2" } } } }
+            ]
+        }))
+            .variables(value!({ "image": { "width": 640, "height": 480 } }))
+            .returns(value!([{ "width": 640, "height": 480 }, { "width": 320, "height": 240 }])),
         case("A loop: the sum of 1..n", &sum)
             .variables(value!({ "n": 1000 }))
             .returns(value!(500500)),
@@ -161,6 +257,14 @@ fn cases() -> Vec<Case> {
             .breakpoints([Breakpoint::tag("name-required"), Breakpoint::path("/do/9")])
             .debug(&[], &[])
             .fails("invalid_config", r#"Invalid run configuration: No step at "/do/9" at /breakpoints/1"#),
+        case("Debugging: step into an obj, one field at a time, then over a list", &profile)
+            .variables(value!({ "user": { "name": "Ada" }, "first": "admin", "second": "beta" }))
+            .breakpoints([Breakpoint::path("/do/0")])
+            .debug(&["step_into", "step_into", "step_into", "step_over"], &[
+                ("/do/0", "breakpoint"), ("/do/0/ret", "step"),
+                ("/do/0/ret/obj/name", "step"), ("/do/0/ret/obj/tags", "step")
+            ])
+            .returns(value!({ "name": "Ada", "tags": ["admin", "beta"] })),
         // Every kind of error.
         case("A missing variable", &readme).expect(value!({ "ok": false, "error": {
             "code": "undefined_variable", "path": "/do/0/set/name/call/text.trim/value"
@@ -171,6 +275,17 @@ fn cases() -> Vec<Case> {
         case("Division by zero", &value!({ "x": "1 / z" }))
             .variables(value!({ "z": 0 }))
             .fails("type_error", r#""/" divided by zero in "1 / z" at /x"#),
+        case("A field that isn't there (a typo)", &value!({ "x": "user.nmae" }))
+            .variables(value!({ "user": { "name": "Ada" } }))
+            .fails("type_error", r#"Object has no field "nmae" in "user.nmae" at /x"#),
+        case("An item past the end of a list, inside an obj", &value!({ "obj": { "items": { "list": [
+            { "x": "items[0]" }, { "x": "items[5]" }
+        ] } } }))
+            .variables(value!({ "items": [1, 2] }))
+            .fails("type_error", r#"Index 5 is out of range for a list of 2 in "items[5]" at /obj/items/list/1/x"#),
+        case("?. excuses only what's missing, not the wrong type", &value!({ "x": "n?.a" }))
+            .variables(value!({ "n": 1 }))
+            .fails("type_error", r#"".a" needs an object, got number in "n?.a" at /x"#),
         case("A throwing function", &value!({ "ext": { "fail": ["throw"] },
             "do": [{ "set": { "x": { "call": { "fail.throw": {} }, "arg": "boom", "tag": "n1" } } }] }))
             .fails("function_failed", r#"Function "fail.throw" failed: boom at /do/0/set/x (tag n1)"#),

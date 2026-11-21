@@ -30,6 +30,7 @@ pub struct ExecutorCall {
     /// The call's arguments, resolved, in program order (empty when it has none).
     pub input: Map,
     pub(crate) signal: Option<Signal>,
+    pub(crate) tag: Option<Arc<str>>,
 }
 
 impl ExecutorCall {
@@ -41,6 +42,7 @@ impl ExecutorCall {
             arg: None,
             input,
             signal: None,
+            tag: None,
         }
     }
 
@@ -53,6 +55,12 @@ impl ExecutorCall {
     /// Sets the run's signal.
     pub fn with_signal(mut self, signal: Signal) -> Self {
         self.signal = Some(signal);
+        self
+    }
+
+    /// Sets the calling node's tag.
+    pub fn with_tag(mut self, tag: impl Into<Arc<str>>) -> Self {
+        self.tag = Some(tag.into());
         self
     }
 
@@ -71,6 +79,13 @@ impl ExecutorCall {
     /// The run's abort signal, if one was given.
     pub fn signal(&self) -> Option<&Signal> {
         self.signal.as_ref()
+    }
+
+    /// The `tag` of the `call` node making this call, if it has one: which
+    /// call it is, for a host that traces or reports its functions' work
+    /// (an editor's node id, say). Shared with the program, not copied.
+    pub fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
     }
 }
 

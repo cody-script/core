@@ -3,7 +3,8 @@
 //! debugger: see [`RunOptions::with_debugger`](crate::RunOptions::with_debugger).
 //!
 //! A **step** is a node of the program: an instruction (`set`, `ret`, `if`,
-//! `for`) or an input (a literal, `val`, `ref`, `x`, `call`, `do`) — what
+//! `for`) or an input (a literal, `val`, `ref`, `x`, `call`, `do`, `obj`,
+//! `list`) — what
 //! a run counts as steps, except the operands inside an expression, which
 //! run as part of their `x`. A step is named by its JSON Pointer into the
 //! program (`/do/1`), the path errors use; a
@@ -151,6 +152,10 @@ pub enum NodeKind {
     Call,
     /// `do` as an input: a block with its own scope.
     Do,
+    /// `obj`: builds an object; its fields are steps of their own.
+    Obj,
+    /// `list`: builds a list; its items are steps of their own.
+    List,
     /// `set`: assigns a variable.
     Set,
     /// `ret`: ends the block with a value.
@@ -170,6 +175,8 @@ impl NodeKind {
             NodeKind::X => "x",
             NodeKind::Call => "call",
             NodeKind::Do => "do",
+            NodeKind::Obj => "obj",
+            NodeKind::List => "list",
             NodeKind::Set => "set",
             NodeKind::Ret => "ret",
             NodeKind::If => "if",
@@ -527,6 +534,8 @@ impl<'p> Node<'p> {
                 InputKind::X(_) => NodeKind::X,
                 InputKind::External(_) | InputKind::Call(_) => NodeKind::Call,
                 InputKind::Do(_) => NodeKind::Do,
+                InputKind::Obj(_) => NodeKind::Obj,
+                InputKind::List(_) => NodeKind::List,
             },
             Node::Instruction(ins) => match &ins.kind {
                 InstructionKind::Set { .. } => NodeKind::Set,
@@ -544,7 +553,9 @@ impl<'p> Node<'p> {
                 InputKind::X(ast) => Some(&ast.source),
                 InputKind::External(external) => Some(&external.name),
                 InputKind::Call(call) => Some(&functions[call.function].name),
-                InputKind::Const(_) | InputKind::Do(_) => None,
+                InputKind::Const(_) | InputKind::Do(_) | InputKind::Obj(_) | InputKind::List(_) => {
+                    None
+                }
             },
             Node::Instruction(ins) => match &ins.kind {
                 InstructionKind::Set { name, .. } => Some(name),
@@ -592,6 +603,10 @@ fn push_parts<'p>(stack: &mut Vec<(Node<'p>, usize)>, node: Node<'p>, depth: usi
             InputKind::External(external) => push_args(stack, &external.args, depth),
             InputKind::Call(call) => push_args(stack, &call.args, depth),
             InputKind::Do(list) => push_all(stack, list, depth),
+            InputKind::Obj(fields) => push_args(stack, fields, depth),
+            InputKind::List(items) => {
+                stack.extend(items.iter().rev().map(|item| (Node::Input(item), depth)));
+            }
             InputKind::Const(_) | InputKind::Ref(_) | InputKind::X(_) => {}
         },
         Node::Instruction(ins) => match &ins.kind {

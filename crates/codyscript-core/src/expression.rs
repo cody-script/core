@@ -1,8 +1,9 @@
 //! The expression language `{ "x": "…" }` nodes use: numbers, 'text', true,
-//! false, null, variable names, `+ - * /`, parentheses, one comparison
-//! (`== != < <= > >=`), `&& ||` and `!` (on booleans only), and `??`.
-//! Parsed once at compile time by hand and evaluated against the run's scope
-//! by walking the tree.
+//! false, null, variable names, fields and items (`a.b`, `a[0]`, and `a?.b`,
+//! `a?[0]` for ones that may be missing), `+ - * /`, parentheses, one
+//! comparison (`== != < <= > >=`), `&& ||` and `!` (on booleans only), and
+//! `??`. Parsed once at compile time by hand and evaluated against the run's
+//! scope by walking the tree.
 //!
 //! The tree is a flat arena and evaluation uses an explicit stack, so neither
 //! running nor dropping a long chain like `a + a + … + a` recurses: an
@@ -12,7 +13,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::value::{Number, Value};
+use crate::value::{Map, Number, Value};
 
 /// A parsed expression, with its source.
 #[derive(Clone, Debug)]
@@ -31,6 +32,11 @@ enum Node {
     Num(f64),
     /// A variable. (Its own copy of the name: reading it is the hot path.)
     Name(Box<str>),
+    /// `a.name`, or `a?.name` (optional: `null` if `a` is `null` or has no
+    /// such field).
+    Field(usize, Box<str>, bool),
+    /// `a[index]`, or `a?[index]` (optional, likewise).
+    Index(usize, usize, bool),
     Unary(Unary, usize),
     Binary(Op, usize, usize),
 }
@@ -156,12 +162,12 @@ fn token_at(source: &str, start: usize) -> Result<(Token<'_>, usize), String> {
         };
         return Ok((token, end));
     }
-    for op in ["==", "!=", "<=", ">=", "&&", "||", "??"] {
+    for op in ["==", "!=", "<=", ">=", "&&", "||", "??", "?.", "?["] {
         if rest.starts_with(op) {
             return Ok((Token::Sym(&rest[..2]), start + 2));
         }
     }
-    if "-+*/()<>!".contains(c) {
+    if "-+*/()<>!.[]".contains(c) {
         return Ok((Token::Sym(&rest[..1]), start + 1));
     }
     Err(format!("Unexpected \"{c}\""))
@@ -274,13 +280,12 @@ impl<'s> Parser<'s> {
         let ast = match token {
             Token::Num(n) => self.push(Node::Num(n)),
             Token::Lit(v) => self.push(Node::Lit(v)),
-            Token::Sym("!") => {
+            Token::Sym(op @ ("!" | "-")) => {
+                // Its operand takes its own fields: `-a.b` is `-(a.b)`.
                 let a = self.unary()?;
-                self.push(Node::Unary(Unary::Not, a))
-            }
-            Token::Sym("-") => {
-                let a = self.unary()?;
-                self.push(Node::Unary(Unary::Neg, a))
+                let op = if op == "!" { Unary::Not } else { Unary::Neg };
+                self.depth -= 1;
+                return Ok(self.push(Node::Unary(op, a)));
             }
             Token::Sym("(") => {
                 let ast = self.level(0)?;
@@ -295,8 +300,51 @@ impl<'s> Parser<'s> {
             }
             Token::Sym(s) => return Err(format!("Unexpected \"{s}\"")),
         };
+        // Still a level deeper: an index nests an expression.
+        let ast = self.access(ast)?;
         self.depth -= 1;
         Ok(ast)
+    }
+
+    /// The fields and items read from `ast`, left to right: `.name`,
+    /// `[index]`, and their optional forms `?.name`, `?[index]`.
+    fn access(&mut self, mut ast: usize) -> Result<usize, String> {
+        loop {
+            let (optional, bracket) = match self.peek() {
+                Some(".") => (false, false),
+                Some("?.") => (true, false),
+                Some("[") => (false, true),
+                Some("?[") => (true, true),
+                _ => return Ok(ast),
+            };
+            let symbol = self.peek().unwrap_or_default();
+            self.i += 1;
+            ast = if bracket {
+                let index = self.level(0)?;
+                if self.peek() != Some("]") {
+                    return Err("Missing \"]\"".into());
+                }
+                self.i += 1;
+                self.push(Node::Index(ast, index, optional))
+            } else {
+                // Any word is a field's name, keywords included (`a.null`).
+                let name = match self.tokens.get(self.i) {
+                    Some((_, word))
+                        if word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') =>
+                    {
+                        word
+                    }
+                    Some((Token::Num(_), _)) => {
+                        return Err(format!(
+                            "Expected a field name after \"{symbol}\"; for a list's item, use [0]"
+                        ));
+                    }
+                    _ => return Err(format!("Expected a field name after \"{symbol}\"")),
+                };
+                self.i += 1;
+                self.push(Node::Field(ast, (*name).into(), optional))
+            };
+        }
     }
 }
 
@@ -360,8 +408,8 @@ enum V<'v> {
     Bool(bool),
     Num(f64, Option<&'v Number>),
     Str(&'v str),
-    List(&'v Value),
-    Obj(&'v Value),
+    List(&'v [Value]),
+    Obj(&'v Map),
 }
 
 impl<'v> V<'v> {
@@ -371,8 +419,8 @@ impl<'v> V<'v> {
             Value::Bool(b) => V::Bool(*b),
             Value::Number(n) => V::Num(n.as_f64(), Some(n)),
             Value::String(s) => V::Str(s),
-            Value::Array(_) => V::List(value),
-            Value::Object(_) => V::Obj(value),
+            Value::Array(items) => V::List(items),
+            Value::Object(map) => V::Obj(map),
         }
     }
 
@@ -399,7 +447,8 @@ impl<'v> V<'v> {
             V::Num(_, Some(n)) => Value::Number(*n),
             V::Num(n, None) => number(n),
             V::Str(s) => Value::String(s.to_owned()),
-            V::List(v) | V::Obj(v) => v.clone(),
+            V::List(items) => Value::Array(items.to_vec()),
+            V::Obj(map) => Value::Object(map.clone()),
         }
     }
 }
@@ -432,8 +481,15 @@ pub(crate) fn number(n: f64) -> Value {
 
 /// What's left to do once an operand is evaluated.
 #[derive(Clone, Copy)]
-enum Task {
+enum Task<'v> {
     Unary(Unary),
+    /// The value is on the value stack: read its field (optionally).
+    Field(&'v str, bool),
+    /// The value is on the value stack; evaluate the index (unless it's
+    /// optional and the value is `null`).
+    Subscript(usize, bool),
+    /// The value and the index are on the value stack: read the item.
+    Index(bool),
     /// The left operand is on the value stack; evaluate the right one.
     Right(Op, usize),
     Apply(Op),
@@ -461,6 +517,14 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
                     Some(v) => values.push(V::of(v)),
                     None => return Err(Fault::Undefined(name.to_string())),
                 },
+                Node::Field(a, name, optional) => {
+                    tasks.push(Task::Field(name, *optional));
+                    next = Some(*a);
+                }
+                Node::Index(a, index, optional) => {
+                    tasks.push(Task::Subscript(*index, *optional));
+                    next = Some(*a);
+                }
                 Node::Unary(op, a) => {
                     tasks.push(Task::Unary(*op));
                     next = Some(*a);
@@ -482,6 +546,21 @@ pub(crate) fn evaluate<'v>(ast: &'v Ast, cx: &mut impl Context<'v>) -> Result<Va
                     (Unary::Not, _) => return Err(needs("!", "a boolean", a)),
                     (Unary::Neg, _) => return Err(needs("-", "a number", a)),
                 });
+            }
+            Task::Field(name, optional) => {
+                let a = pop(&mut values);
+                values.push(field(a, name, optional).map_err(Fault::Type)?);
+            }
+            // `a?[i]` of a `null` is `null`, without evaluating `i`.
+            Task::Subscript(_, true) if matches!(values.last(), Some(V::Null)) => {}
+            Task::Subscript(index, optional) => {
+                tasks.push(Task::Index(optional));
+                next = Some(index);
+            }
+            Task::Index(optional) => {
+                let index = pop(&mut values);
+                let a = pop(&mut values);
+                values.push(item(a, index, optional).map_err(Fault::Type)?);
             }
             Task::Right(op @ (Op::And | Op::Or), c) => {
                 let a = values.last().unwrap_or(V::Null);
@@ -575,7 +654,10 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
     let pair = || format!("{} and {}", a.kind(), c.kind());
     match op {
         Op::Eq | Op::Ne => {
-            if a.is_list() || c.is_list() {
+            // Anything can be tested for `null`, as any `Option` can be
+            // compared with `None`; a list or object is never `null`.
+            let null_test = matches!(a, V::Null) || matches!(c, V::Null);
+            if !null_test && (a.is_list() || c.is_list()) {
                 return Err(format!("\"{op}\" can't compare {}", pair()));
             }
             Ok(V::Bool(strict_eq(a, c) == (op == Op::Eq)))
@@ -622,6 +704,50 @@ fn binary<'v>(op: Op, a: V<'v>, c: V<'v>) -> Result<V<'v>, String> {
         }
         // Short-circuited by `evaluate`; never applied.
         Op::Default | Op::And | Op::Or => Ok(a),
+    }
+}
+
+/// `a.name`, or with `optional`, `a?.name`: `null` if `a` is `null` or has
+/// no field `name`.
+fn field<'v>(a: V<'v>, name: &str, optional: bool) -> Result<V<'v>, String> {
+    match a {
+        V::Obj(map) => match map.get(name) {
+            Some(value) => Ok(V::of(value)),
+            None if optional => Ok(V::Null),
+            None => Err(format!("Object has no field \"{name}\"")),
+        },
+        V::Null if optional => Ok(V::Null),
+        _ => Err(format!("\".{name}\" needs an object, got {}", a.kind())),
+    }
+}
+
+/// `a[index]` — a list's item, by a whole number from 0, or an object's
+/// field, by its name — or with `optional`, `a?[index]`: `null` if there's
+/// no such item or field. (`evaluate` answers `null?[i]` itself, without
+/// evaluating `i`.)
+fn item<'v>(a: V<'v>, index: V<'_>, optional: bool) -> Result<V<'v>, String> {
+    match (a, index) {
+        (V::List(items), V::Num(n, _)) => {
+            if !(n >= 0.0 && n.fract() == 0.0) {
+                return Err(format!("List index must be a whole number from 0, got {n}"));
+            }
+            // A float too large for a `usize` saturates: past the end too.
+            match items.get(n as usize) {
+                Some(value) => Ok(V::of(value)),
+                None if optional => Ok(V::Null),
+                None => Err(format!(
+                    "Index {n} is out of range for a list of {}",
+                    items.len()
+                )),
+            }
+        }
+        (V::List(_), _) => Err(format!("List index must be a number, got {}", index.kind())),
+        (V::Obj(_), V::Str(name)) => field(a, name, optional),
+        (V::Obj(_), _) => Err(format!("Object key must be a string, got {}", index.kind())),
+        _ => Err(format!(
+            "\"[]\" needs a list or an object, got {}",
+            a.kind()
+        )),
     }
 }
 

@@ -114,9 +114,10 @@ impl Program {
 /// - `executors`: `{ id: { function: (call) => value, … }, … }`, or `null`:
 ///   each executor an object of the external functions it provides, which
 ///   programs declare in `ext` and call as `id.function`. A function
-///   receives `{ op, arg?, input }` (`op` is its own name) and returns a JSON
-///   value, or a promise of one; `undefined` is `null`, and throwing (or
-///   rejecting) fails the run with `function_failed`.
+///   receives `{ op, arg?, input, tag? }` (`op` is its own name, `tag` the
+///   call node's) and returns a JSON value, or a promise of one; `undefined`
+///   is `null`, and throwing (or rejecting) fails the run with
+///   `function_failed`.
 /// - `limits`: JSON text like `{"max_steps":1000,"max_depth":64}`, or `""`.
 ///
 /// Resolves with JSON text: `{"ok":true,"value":…,"variables":…,"steps":…}`,
@@ -454,13 +455,15 @@ impl Executor for JsExecutor {
     }
 }
 
-/// What a JavaScript executor receives: `{ op, arg?, input }`.
+/// What a JavaScript executor receives: `{ op, arg?, input, tag? }`.
 #[derive(Serialize)]
 struct Call<'a> {
     op: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     arg: Option<&'a Value>,
     input: &'a Variables,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<&'a str>,
 }
 
 /// Calls `function` with `call`: what it returns, maybe a promise.
@@ -469,6 +472,7 @@ fn call_js(function: &Function, call: &ExecutorCall) -> Result<JsValue, BoxError
         op: call.op(),
         arg: call.arg(),
         input: &call.input,
+        tag: call.tag(),
     })?;
     let argument = JSON::parse(&call).map_err(describe)?;
     function.call1(&JsValue::NULL, &argument).map_err(describe)

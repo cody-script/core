@@ -21,6 +21,7 @@ none. MIT licensed.
 |---|---|---|
 | [`codyscript-core`](crates/codyscript-core) | The interpreter: data model (`Value`), validation, expressions, engine, debugger, errors. Knows no data format. | `serde` |
 | [`codyscript-json`](crates/codyscript-json) | JSON: parse and print programs and values, the language's JSON Schema, `serde_json` interop. | `codyscript-core`, `serde_json` |
+| [`codyscript-text`](crates/codyscript-text) | Text functions (`trim`, `upper`, `split`, `join`, …) as an executor, and the example to follow when writing one. Not published yet. | `codyscript-core` |
 | [`codyscript-wasm`](crates/codyscript-wasm) | WebAssembly bindings: run JSON programs from JavaScript, with JavaScript executors (sync or async). Not published. | `codyscript-json`, `wasm-bindgen` |
 | [`codyscript-playground`](crates/codyscript-playground) | A page for smoke-testing the WebAssembly build in a browser, served by `axum`. Not published. | `axum`, `wasm-bindgen-cli-support` |
 | [`codyscript-bench`](crates/codyscript-bench) | Benchmarks: speed and memory, natively (with and without Tokio) and in WebAssembly. Not published. | `criterion`, `tokio` (dev) |
@@ -29,9 +30,13 @@ Dependencies point one way, inward:
 
 ```text
 codyscript-json ──▶ codyscript-core ──▶ serde
-      │                                   ▲
+      │                  ▲                ▲
+      │   codyscript-text┘                │
       └──────────▶ serde_json ────────────┘
 ```
+
+Executor crates, like `codyscript-text`, depend on the core alone: an
+executor works on `Value`s, whatever format its programs are stored in.
 
 The core owns its data model and implements serde's `Serialize` and
 `Deserialize` for it, and nothing else. That is the whole contract a data
@@ -43,8 +48,8 @@ it. The core never changes for a new format.
 
 ```toml
 [dependencies]
-codyscript-core = "0.10"
-codyscript-json = "0.10"  # if your programs are stored as JSON
+codyscript-core = "0.11"
+codyscript-json = "0.11"  # if your programs are stored as JSON
 ```
 
 The crates need Rust 1.99 or newer (edition 2024).

@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "codyscript-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ciborium",
  "serde",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "codyscript-json"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "codyscript-core",
  "jsonschema",
@@ -288,8 +288,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codyscript-text"
+version = "0.11.0"
+dependencies = [
+ "codyscript-core",
+ "codyscript-json",
+]
+
+[[package]]
 name = "codyscript-wasm"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "codyscript-core",
  "codyscript-json",
