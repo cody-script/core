@@ -49,11 +49,11 @@ fn messages_say_what_is_wrong() {
     let cases = [
         (
             value!({ "rf": "x" }),
-            r#"Invalid program: Expected an input with exactly one of "val", "ref", "x", "call", "do", "obj", "list""#,
+            r#"Invalid program: Expected an input with exactly one of "val", "ref", "x", "call", "do", "obj", "list", "is", "problems", "run""#,
         ),
         (
             value!({ "ref": "a", "val": 1 }),
-            r#"Invalid program: Expected an input with exactly one of "val", "ref", "x", "call", "do", "obj", "list", found "val" and "ref""#,
+            r#"Invalid program: Expected an input with exactly one of "val", "ref", "x", "call", "do", "obj", "list", "is", "problems", "run", found "val" and "ref""#,
         ),
         (
             m(vec![value!(1)]),
@@ -139,6 +139,45 @@ fn messages_say_what_is_wrong() {
         (
             with_ext(m(vec![]), value!({ "math": ["sub"] })),
             r#"Unknown function "math.sub" at /ext/math/0"#,
+        ),
+        // Types: what a type names must be one, and hold more than itself.
+        (
+            value!({ "is": 1, "type": "Nope" }),
+            r#"Invalid program: Unknown type "Nope" at /type"#,
+        ),
+        (
+            value!({ "types": { "A": { "list": "B?" } }, "do": [] }),
+            r#"Invalid program: Unknown type "B" at /types/A/list"#,
+        ),
+        // One `?` makes a type optional; a second is part of the name.
+        (
+            value!({ "types": { "A": "string" }, "is": 1, "type": "A??" }),
+            r#"Invalid program: Unknown type "A?" at /type"#,
+        ),
+        (
+            value!({ "types": { "A": "B", "B": "A?" }, "do": [] }),
+            r#"Invalid program: Type "A" is only itself: an object, list or map has to hold it at /types/A"#,
+        ),
+        (
+            value!({ "types": { "Me": "Me" }, "do": [] }),
+            r#"Invalid program: Type "Me" is only itself: an object, list or map has to hold it at /types/Me"#,
+        ),
+        (
+            value!({ "types": { "string": "number" }, "do": [] }),
+            r#"Invalid program: "string" is a built-in type at /types/string"#,
+        ),
+        (
+            value!({ "types": { "A?": "string" }, "do": [] }),
+            r#"Invalid program: A type's name can't end with "?": "A?" would read as an optional "A" at /types/A?"#,
+        ),
+        // Only a test may run the program: not the program, nor its functions.
+        (
+            value!({ "run": {} }),
+            r#"Invalid program: "run" runs the program from one of its tests: only a test may at /run"#,
+        ),
+        (
+            with_fn(m(vec![]), [("f", value!({ "run": {} }))]),
+            r#"Invalid program: "run" runs the program from one of its tests: only a test may at /fn/f/run"#,
         ),
     ];
     for (program, message) in cases {
@@ -371,6 +410,25 @@ fn refuses_a_program_nested_past_max_depth_before_walking_it() {
     // Values drop recursively; this one is too deep for a test
     // thread's stack, so leak it instead.
     std::mem::forget(deep);
+}
+
+#[test]
+fn refuses_a_type_nested_past_max_depth_before_walking_it() {
+    let mut deep = value!("number");
+    for _ in 0..100_000 {
+        deep = value!({ "list": deep });
+    }
+    let program = value!({ "types": { "Deep": deep }, "do": [] });
+    let error = compile_error(&engine(), &program);
+    assert_eq!(error.code(), ErrorCode::InvalidProgram);
+    assert!(
+        error.message().contains("deeper than 128 levels"),
+        "{}",
+        error.message()
+    );
+    assert!(error.path().starts_with("/types/Deep/list/list"));
+    // As above: too deep to drop on a test thread's stack.
+    std::mem::forget(program);
 }
 
 #[test]

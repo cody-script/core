@@ -270,6 +270,105 @@ async fn wrong_arguments_reject() {
 // ── Compiled once, run many times ───────────────────────────────────────────
 
 /// Runs a compiled program; the outcome, parsed.
+/// The README's rule, with a type for what it's given, and tests of it.
+const TESTED_RULE: &str = r#"{
+  "ext": { "text": ["trim", "empty"] },
+  "types": { "Row": { "obj": { "Name": "string" } } },
+  "tests": {
+    "trims the name": { "do": [{ "expect": { "run": { "Name": " Ada " } }, "eq": "Ada" }] },
+    "a blank name is refused": { "do": [
+      { "expect": { "run": { "Name": "  " } }, "eq": { "val": { "error": "Name is required" } }, "tag": "blank" }
+    ] },
+    "a row is a Row": { "do": [{ "expect": { "is": { "val": { "Name": "a" } }, "type": "Row" } }] }
+  },
+  "do": [
+    { "set": { "name": { "call": { "text.trim": { "value": { "ref": "Name" } } } } } },
+    { "if": { "call": { "text.empty": { "value": { "ref": "name" } } } },
+      "do": [{ "ret": { "val": { "error": "Name is required" } } }] },
+    { "ret": { "ref": "name" } } ] }"#;
+
+#[wasm_bindgen_test]
+async fn a_programs_tests_are_listed_and_run_with_javascript_functions() {
+    let listed =
+        codyscript_wasm::tests(TESTED_RULE.into(), text_executor(), String::new()).unwrap();
+    assert_eq!(
+        codyscript_json::from_str::<Value>(&listed).unwrap(),
+        value!({ "ok": true, "tests": ["trims the name", "a blank name is refused", "a row is a Row"] })
+    );
+    for name in [
+        "trims the name",
+        "a blank name is refused",
+        "a row is a Row",
+    ] {
+        let outcome = codyscript_wasm::test(
+            TESTED_RULE.into(),
+            name.into(),
+            String::new(),
+            text_executor(),
+            String::new(),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("test rejected"));
+        let outcome: Value = codyscript_json::from_str(&outcome).unwrap();
+        assert_eq!(outcome["ok"], true, "{name}: {outcome:?}");
+    }
+    // A test that fails says where, and why.
+    let failing = TESTED_RULE.replace("\"eq\": \"Ada\"", "\"eq\": \"Bob\"");
+    let outcome = codyscript_wasm::test(
+        failing,
+        "trims the name".into(),
+        String::new(),
+        text_executor(),
+        String::new(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("test rejected"));
+    let outcome: Value = codyscript_json::from_str(&outcome).unwrap();
+    assert_eq!(outcome["error"]["code"], "expectation_failed");
+    assert_eq!(outcome["error"]["path"], "/tests/trims the name/do/0");
+    // No such test: the arguments are wrong.
+    assert!(
+        codyscript_wasm::test(
+            TESTED_RULE.into(),
+            "nope".into(),
+            String::new(),
+            text_executor(),
+            String::new(),
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[wasm_bindgen_test]
+fn values_are_checked_against_a_programs_types() {
+    let checked = codyscript_wasm::problems(
+        TESTED_RULE.into(),
+        "Row".into(),
+        r#"{ "Name": 1, "Age": 3 }"#.into(),
+        text_executor(),
+        String::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        codyscript_json::from_str::<Value>(&checked).unwrap(),
+        value!({ "ok": true, "problems": [
+            { "path": "/Age", "message": "Unknown field \"Age\"" },
+            { "path": "/Name", "message": "Expected a string, got number" }
+        ] })
+    );
+    assert!(
+        codyscript_wasm::problems(
+            TESTED_RULE.into(),
+            "Nope".into(),
+            "1".into(),
+            text_executor(),
+            String::new(),
+        )
+        .is_err()
+    );
+}
+
 async fn run_compiled(program: &codyscript_wasm::Program, variables: &str) -> Value {
     let outcome = JsFuture::from(program.run(variables.into()))
         .await

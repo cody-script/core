@@ -48,8 +48,8 @@ it. The core never changes for a new format.
 
 ```toml
 [dependencies]
-codyscript-core = "0.11"
-codyscript-json = "0.11"  # if your programs are stored as JSON
+codyscript-core = "0.12"
+codyscript-json = "0.12"  # if your programs are stored as JSON
 ```
 
 The crates need Rust 1.99 or newer (edition 2024).
@@ -122,6 +122,16 @@ kept beside it, apart from the rule, as a *run configuration*: a JSON
 document with [its own schema](crates/codyscript-json/run-config.schema.json). See the core README's
 [Debugging](crates/codyscript-core/README.md#debugging), and try it in the
 playground, below.
+
+A rule can also say what its data looks like, and carry its own tests, in
+the same document. `types` declares objects, lists and maps by name
+(`"Todo": { "obj": { "title": "string", "due": "string?" } }`), which the
+rule checks values against with `is` and `problems` — and a host with
+`rule.problems(&value, "Todo")`. `tests` holds programs that call the
+rule's functions, run the rule itself, and `expect` what they get; a host
+runs each with `test.run(options)`, wherever the rule is used. See
+[Types](crates/codyscript-core/README.md#types) and
+[Tests](crates/codyscript-core/README.md#tests).
 
 ## WebAssembly
 

@@ -45,6 +45,9 @@ pub enum ErrorCode {
     /// A [run configuration](crate::RunConfig) doesn't fit its program: a
     /// breakpoint names no step.
     InvalidConfig,
+    /// An `expect` failed: its value wasn't `true`, or wasn't equal to its
+    /// `eq`'s. A test fails with it.
+    ExpectationFailed,
 }
 
 impl ErrorCode {
@@ -61,6 +64,7 @@ impl ErrorCode {
             ErrorCode::DepthLimit => "depth_limit",
             ErrorCode::Aborted => "aborted",
             ErrorCode::InvalidConfig => "invalid_config",
+            ErrorCode::ExpectationFailed => "expectation_failed",
         }
     }
 }
@@ -71,10 +75,13 @@ impl fmt::Display for ErrorCode {
     }
 }
 
-/// One problem found while compiling a program.
+/// One problem: in a program, found while compiling it; or in a value
+/// checked against a type
+/// ([`CompiledProgram::problems`](crate::CompiledProgram::problems)), with
+/// `path` into the value.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Issue {
-    /// JSON Pointer to the offending node.
+    /// JSON Pointer to the offending node (or, in a value, to what's wrong).
     pub path: String,
     /// What's wrong there.
     pub message: String,

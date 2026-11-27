@@ -2,7 +2,7 @@
 	"$schema": "https://json-schema.org/draft/2020-12/schema",
 	"$id": "https://github.com/cody-script/core/schema.json",
 	"title": "CodyScript program",
-	"description": "A program is an input: a literal or an input node, usually a block ({ \"do\": [...] }). Its root node may also define CodyScript functions (\"fn\") and declare the external functions the host provides (\"ext\"); \"call\" calls either kind. Every node is an object whose type is its key. The engine's compile() also checks what each call names, that no name is in both \"fn\" and \"ext\", that only external calls take \"arg\", that the host provides every \"ext\" function, nesting depth and finite numbers.",
+	"description": "A program is an input: a literal or an input node, usually a block ({ \"do\": [...] }). Its root node may also define CodyScript functions (\"fn\"), declare the external functions the host provides (\"ext\"), declare types (\"types\") and carry tests (\"tests\"); \"call\" calls either kind of function, \"is\" and \"problems\" check a value against a type, and \"expect\" fails a run unless a value holds. Every node is an object whose type is its key. The engine's compile() also checks what each call and type names, that no name is in both \"fn\" and \"ext\", that only external calls take \"arg\", that the host provides every \"ext\" function, that no type is only itself, that only tests \"run\" the program, nesting depth and finite numbers.",
 	"anyOf": [
 		{
 			"$ref": "#/$defs/literal"
@@ -15,6 +15,12 @@
 				},
 				"ext": {
 					"$ref": "#/$defs/externals"
+				},
+				"types": {
+					"$ref": "#/$defs/types"
+				},
+				"tests": {
+					"$ref": "#/$defs/tests"
 				}
 			},
 			"unevaluatedProperties": false
@@ -42,7 +48,7 @@
 			]
 		},
 		"node": {
-			"description": "An input node: exactly one of its types, each defined with the fields it may carry (closed where it's used: an input takes no others, the root also \"fn\" and \"ext\").",
+			"description": "An input node: exactly one of its types, each defined with the fields it may carry (closed where it's used: an input takes no others, the root also \"fn\", \"ext\", \"types\" and \"tests\").",
 			"type": "object",
 			"oneOf": [
 				{
@@ -65,6 +71,15 @@
 				},
 				{
 					"$ref": "#/$defs/list"
+				},
+				{
+					"$ref": "#/$defs/is"
+				},
+				{
+					"$ref": "#/$defs/problems"
+				},
+				{
+					"$ref": "#/$defs/run"
 				}
 			]
 		},
@@ -81,6 +96,9 @@
 				},
 				{
 					"$ref": "#/$defs/for"
+				},
+				{
+					"$ref": "#/$defs/expect"
 				}
 			]
 		},
@@ -147,6 +165,101 @@
 				"items": {
 					"$ref": "#/$defs/name"
 				}
+			}
+		},
+		"types": {
+			"description": "The types the program declares, by name: each a type, which may name others, and itself (inside an object, list or map). A name can't end with \"?\", nor be a built-in type's. Only the root may carry it.",
+			"type": "object",
+			"propertyNames": {
+				"allOf": [
+					{
+						"$ref": "#/$defs/name"
+					},
+					{
+						"pattern": "[^?]$"
+					},
+					{
+						"not": {
+							"enum": [
+								"any",
+								"null",
+								"boolean",
+								"number",
+								"integer",
+								"string",
+								"list",
+								"object"
+							]
+						}
+					}
+				]
+			},
+			"additionalProperties": {
+				"$ref": "#/$defs/type"
+			}
+		},
+		"type": {
+			"description": "A type: a name — a built-in (any, null, boolean, number, integer, string, list, object) or one the program declares in \"types\" — and with \"?\" after it, or null (an object's field may then be left out); or an object, list or map of types.",
+			"anyOf": [
+				{
+					"type": "string",
+					"minLength": 1,
+					"not": {
+						"const": "?"
+					}
+				},
+				{
+					"$ref": "#/$defs/typeNode"
+				}
+			]
+		},
+		"typeNode": {
+			"description": "{ \"obj\": { <field>: <type>, … } }: an object with these fields and no others. { \"list\": <type> }: a list of them. { \"map\": <type> }: an object whose every field's value is one.",
+			"type": "object",
+			"oneOf": [
+				{
+					"required": [
+						"obj"
+					]
+				},
+				{
+					"required": [
+						"list"
+					]
+				},
+				{
+					"required": [
+						"map"
+					]
+				}
+			],
+			"additionalProperties": false,
+			"properties": {
+				"obj": {
+					"type": "object",
+					"additionalProperties": {
+						"$ref": "#/$defs/type"
+					}
+				},
+				"list": {
+					"$ref": "#/$defs/type"
+				},
+				"map": {
+					"$ref": "#/$defs/type"
+				},
+				"tag": {
+					"$ref": "#/$defs/tag"
+				}
+			}
+		},
+		"tests": {
+			"description": "The program's tests, by name: each a program of its own, which passes if it runs to the end. It may call the program's functions and the host's, and \"run\" the program. Only the root may carry it.",
+			"type": "object",
+			"propertyNames": {
+				"$ref": "#/$defs/name"
+			},
+			"additionalProperties": {
+				"$ref": "#/$defs/input"
 			}
 		},
 		"val": {
@@ -280,6 +393,65 @@
 				}
 			}
 		},
+		"is": {
+			"description": "Whether a value is a type: true or false.",
+			"type": "object",
+			"required": [
+				"is",
+				"type"
+			],
+			"properties": {
+				"is": {
+					"$ref": "#/$defs/input"
+				},
+				"type": {
+					"$ref": "#/$defs/type"
+				},
+				"tag": {
+					"$ref": "#/$defs/tag"
+				}
+			}
+		},
+		"problems": {
+			"description": "What's wrong with a value as a type: a list of { path, message }, empty if it is one.",
+			"type": "object",
+			"required": [
+				"problems",
+				"type"
+			],
+			"properties": {
+				"problems": {
+					"$ref": "#/$defs/input"
+				},
+				"type": {
+					"$ref": "#/$defs/type"
+				},
+				"tag": {
+					"$ref": "#/$defs/tag"
+				}
+			}
+		},
+		"run": {
+			"description": "In a test, runs the program with these variables (and no others), and gives its value. compile() checks that only tests run it.",
+			"type": "object",
+			"required": [
+				"run"
+			],
+			"properties": {
+				"run": {
+					"type": "object",
+					"propertyNames": {
+						"$ref": "#/$defs/name"
+					},
+					"additionalProperties": {
+						"$ref": "#/$defs/input"
+					}
+				},
+				"tag": {
+					"$ref": "#/$defs/tag"
+				}
+			}
+		},
 		"set": {
 			"description": "Assigns one variable in the current scope: { \"set\": { \"<name>\": <input> } }.",
 			"type": "object",
@@ -357,6 +529,25 @@
 				},
 				"do": {
 					"$ref": "#/$defs/instructions"
+				},
+				"tag": {
+					"$ref": "#/$defs/tag"
+				}
+			}
+		},
+		"expect": {
+			"description": "Fails the run (and a test) with expectation_failed unless the value is true — or, with eq, equal to eq's: lists item by item, objects field by field in any order, numbers by value.",
+			"type": "object",
+			"required": [
+				"expect"
+			],
+			"additionalProperties": false,
+			"properties": {
+				"expect": {
+					"$ref": "#/$defs/input"
+				},
+				"eq": {
+					"$ref": "#/$defs/input"
 				},
 				"tag": {
 					"$ref": "#/$defs/tag"

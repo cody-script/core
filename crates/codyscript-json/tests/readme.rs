@@ -1,5 +1,6 @@
-//! The README's first `json` example, and the core README's functions
-//! example, run as written, so the docs can't drift from the code.
+//! The README's first `json` example, and the core README's functions,
+//! types and tests examples, run as written, so the docs can't drift from
+//! the code.
 
 #[path = "../../codyscript-core/tests/common/mod.rs"]
 mod common;
@@ -70,4 +71,50 @@ fn the_core_readmes_functions_example_works() {
         compiled_value(&compiled, row("  ", 1000)),
         value!({ "error": "Name is required" })
     );
+}
+
+/// The core README's first program with `key` at its root.
+fn core_readme_program(key: &str) -> Value {
+    support::readme_json_blocks("crates/codyscript-core/README.md")
+        .into_iter()
+        .map(|(_, json)| json)
+        .find(|json| json.get(key).is_some())
+        .unwrap_or_else(|| panic!("a program with {key}"))
+}
+
+#[test]
+fn the_core_readmes_types_example_works() {
+    let compiled = Engine::new()
+        .compile(&core_readme_program("types"))
+        .unwrap();
+    let todo = value!({ "title": "a", "done": false, "tags": [], "owner": { "name": "b" } });
+    let created = compiled_value(&compiled, with_vars(value!({ "body": todo })));
+    assert_eq!(created["status"], 201);
+    // The body and problems it says.
+    let body = value!({ "title": 7, "tags": ["a", 2], "urgent": true });
+    let refused = compiled_value(&compiled, with_vars(value!({ "body": body })));
+    assert_eq!(
+        refused,
+        value!({ "status": 400, "problems": [
+            { "path": "/urgent", "message": "Unknown field \"urgent\"" },
+            { "path": "", "message": "Missing field \"done\"" },
+            { "path": "/title", "message": "Expected a string, got number" },
+            { "path": "/tags/1", "message": "Expected a string, got number" }
+        ] })
+    );
+}
+
+#[test]
+fn the_core_readmes_tests_example_works() {
+    let compiled = Engine::new()
+        .compile(&core_readme_program("tests"))
+        .unwrap();
+    assert_eq!(compiled.tests().len(), 3);
+    for test in compiled.tests() {
+        let outcome = test.run_blocking(RunOptions::new());
+        assert!(outcome.is_ok(), "{}: {outcome:?}", test.name());
+    }
+    // As a program, it charges its fee.
+    let charged = compiled_value(&compiled, with_vars(value!({ "Amount": 20000 })));
+    assert_eq!(charged, 300);
 }

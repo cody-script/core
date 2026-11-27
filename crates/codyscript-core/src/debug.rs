@@ -30,6 +30,7 @@ use crate::engine::Variables;
 use crate::error::{Details, Error, ErrorCode, Issue};
 use crate::executor::BoxFuture;
 use crate::program::{Function, Input, InputKind, Instruction, InstructionKind, Program};
+use crate::types::{Type, TypeDef};
 use crate::value::Value;
 
 /// A step to pause before, named by its tag or by its path.
@@ -164,6 +165,15 @@ pub enum NodeKind {
     If,
     /// `for`: a loop. A loop's test, a step of its own, runs before each pass.
     For,
+    /// `is`: whether a value is a type.
+    Is,
+    /// `problems`: what's wrong with a value as a type.
+    Problems,
+    /// `run`: in a test, runs the program; its variables are steps of their
+    /// own, and so is each of the program's.
+    Run,
+    /// `expect`: fails the run unless a value is `true`, or equal to another.
+    Expect,
 }
 
 impl NodeKind {
@@ -181,6 +191,10 @@ impl NodeKind {
             NodeKind::Ret => "ret",
             NodeKind::If => "if",
             NodeKind::For => "for",
+            NodeKind::Is => "is",
+            NodeKind::Problems => "problems",
+            NodeKind::Run => "run",
+            NodeKind::Expect => "expect",
         }
     }
 }
@@ -273,7 +287,7 @@ impl<F> fmt::Debug for FnDebugger<F> {
 /// A step of a program: a node a run can pause before. See
 /// [`CompiledProgram::steps`](crate::CompiledProgram::steps).
 ///
-/// Serializes as `{ path, kind, name?, tag?, function?, depth }`.
+/// Serializes as `{ path, kind, name?, tag?, function?, test?, depth }`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Step<'a> {
     /// JSON Pointer to the node: what a breakpoint names.
@@ -287,12 +301,16 @@ pub struct Step<'a> {
     /// Its `tag`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<&'a str>,
-    /// The CodyScript function it's part of; `None` for the program's body.
+    /// The CodyScript function it's part of; `None` for the program's body
+    /// and its tests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function: Option<&'a str>,
-    /// How many steps it's inside, within the program's body or its
-    /// function's: `0` for the top-level instructions (or a body that isn't
-    /// a block), `1` for their parts, and so on.
+    /// The test it's part of, if it's one of a test's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test: Option<&'a str>,
+    /// How many steps it's inside, within the program's body, its
+    /// function's or its test's: `0` for the top-level instructions (or a
+    /// body that isn't a block), `1` for their parts, and so on.
     pub depth: usize,
 }
 
@@ -313,11 +331,13 @@ impl Step<'_> {
 /// Serializes as `{ function?, call?, scopes }`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Frame<'a> {
-    /// The CodyScript function's name; `None` for the program's body.
+    /// The CodyScript function's name; `None` for the program's body (and
+    /// a test's).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function: Option<&'a str>,
-    /// The path of the `call` that's running it, in the frame before;
-    /// `None` for the program's body.
+    /// The path of the `call` that's running it, in the frame before — or
+    /// of the test's `run`, for the program a test runs; `None` for the
+    /// frame the run started in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call: Option<&'a str>,
     /// Its variables: its scopes, outermost first — the run's variables or
@@ -329,9 +349,9 @@ pub struct Frame<'a> {
 /// A paused run, as its [`Debugger`] sees it: the step it's about to take,
 /// its call stack and variables, and the breakpoints.
 ///
-/// Serializes as `{ reason, path, kind, name?, tag?, function?, depth,
-/// steps, frames, breakpoints }` — the step's fields flattened in: what a
-/// host might send a user interface.
+/// Serializes as `{ reason, path, kind, name?, tag?, function?, test?,
+/// depth, steps, frames, breakpoints }` — the step's fields flattened in:
+/// what a host might send a user interface.
 #[derive(Debug, Serialize)]
 pub struct Pause<'a> {
     reason: Reason,
@@ -536,26 +556,37 @@ impl<'p> Node<'p> {
                 InputKind::Do(_) => NodeKind::Do,
                 InputKind::Obj(_) => NodeKind::Obj,
                 InputKind::List(_) => NodeKind::List,
+                InputKind::Check(check) if check.problems => NodeKind::Problems,
+                InputKind::Check(_) => NodeKind::Is,
+                InputKind::Run(_) => NodeKind::Run,
             },
             Node::Instruction(ins) => match &ins.kind {
                 InstructionKind::Set { .. } => NodeKind::Set,
                 InstructionKind::Ret(_) => NodeKind::Ret,
                 InstructionKind::If { .. } => NodeKind::If,
                 InstructionKind::For { .. } => NodeKind::For,
+                InstructionKind::Expect(_) => NodeKind::Expect,
             },
         }
     }
 
-    fn name(self, functions: &'p [Function]) -> Option<&'p str> {
+    fn name(self, functions: &'p [Function], types: &'p [TypeDef]) -> Option<&'p str> {
         match self {
             Node::Input(input) => match &input.kind {
                 InputKind::Ref(name) => Some(name),
                 InputKind::X(ast) => Some(&ast.source),
                 InputKind::External(external) => Some(&external.name),
                 InputKind::Call(call) => Some(&functions[call.function].name),
-                InputKind::Const(_) | InputKind::Do(_) | InputKind::Obj(_) | InputKind::List(_) => {
-                    None
-                }
+                // A type the program declares, by its name.
+                InputKind::Check(check) => match check.ty {
+                    Type::Named(index) => Some(&types[index].name),
+                    _ => None,
+                },
+                InputKind::Const(_)
+                | InputKind::Do(_)
+                | InputKind::Obj(_)
+                | InputKind::List(_)
+                | InputKind::Run(_) => None,
             },
             Node::Instruction(ins) => match &ins.kind {
                 InstructionKind::Set { name, .. } => Some(name),
@@ -566,14 +597,25 @@ impl<'p> Node<'p> {
 }
 
 /// Every step of `program`, in the order written: its body's, then each
-/// function's. Walks an explicit stack, so no program can overflow this one.
+/// function's, then each test's. Walks an explicit stack, so no program can
+/// overflow this one.
 pub(crate) fn steps(program: &Program) -> Vec<Step<'_>> {
     let functions = &program.functions;
-    let bodies = std::iter::once((None, &program.body))
-        .chain(functions.iter().map(|f| (Some(f.name.as_str()), &f.body)));
+    let bodies = std::iter::once((None, None, &program.body))
+        .chain(
+            functions
+                .iter()
+                .map(|f| (Some(f.name.as_str()), None, &f.body)),
+        )
+        .chain(
+            program
+                .tests
+                .iter()
+                .map(|t| (None, Some(t.name.as_str()), &t.body)),
+        );
     let mut steps = Vec::new();
     let mut stack = Vec::new();
-    for (function, body) in bodies {
+    for (function, test, body) in bodies {
         // A body that is a block isn't a step of its own; its instructions
         // are.
         match &body.kind {
@@ -584,9 +626,10 @@ pub(crate) fn steps(program: &Program) -> Vec<Step<'_>> {
             steps.push(Step {
                 path: node.path(),
                 kind: node.kind(),
-                name: node.name(functions),
+                name: node.name(functions, &program.types),
                 tag: node.tag(),
                 function,
+                test,
                 depth,
             });
             push_parts(&mut stack, node, depth + 1);
@@ -607,6 +650,8 @@ fn push_parts<'p>(stack: &mut Vec<(Node<'p>, usize)>, node: Node<'p>, depth: usi
             InputKind::List(items) => {
                 stack.extend(items.iter().rev().map(|item| (Node::Input(item), depth)));
             }
+            InputKind::Check(check) => stack.push((Node::Input(&check.value), depth)),
+            InputKind::Run(variables) => push_args(stack, variables, depth),
             InputKind::Const(_) | InputKind::Ref(_) | InputKind::X(_) => {}
         },
         Node::Instruction(ins) => match &ins.kind {
@@ -625,6 +670,12 @@ fn push_parts<'p>(stack: &mut Vec<(Node<'p>, usize)>, node: Node<'p>, depth: usi
             InstructionKind::For { test, body } => {
                 push_all(stack, body, depth);
                 stack.push((Node::Input(test), depth));
+            }
+            InstructionKind::Expect(expect) => {
+                if let Some(eq) = &expect.eq {
+                    stack.push((Node::Input(eq), depth));
+                }
+                stack.push((Node::Input(&expect.value), depth));
             }
         },
     }

@@ -30,14 +30,17 @@ use crate::error::{Cause, Details, Error, ErrorCode};
 use crate::executor::{ExecutorCall, Signal};
 use crate::expression::{self, Ast, Fault, Stop};
 use crate::program::{
-    Call, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
+    Call, Check, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
 };
+use crate::types::{self, TypeDef};
 use crate::value::{Map, Value};
 
-/// Runs `program`'s body to completion; with a debugger, pausing where it
-/// says.
+/// Runs `entry` — `program`'s body, or one of its tests' — to completion,
+/// in the root scope; with a debugger, pausing where it says. A test passes
+/// if its run does.
 pub(crate) async fn run(
     program: &Program,
+    entry: &Input,
     limits: Limits,
     options: RunOptions<'_>,
 ) -> Result<RunResult, Error> {
@@ -53,6 +56,8 @@ pub(crate) async fn run(
     };
     let mut machine = Machine {
         functions: &program.functions,
+        types: &program.types,
+        main: &program.body,
         meter: Meter {
             steps: 0,
             max_steps: limits.max_steps,
@@ -67,9 +72,9 @@ pub(crate) async fn run(
         results: Vec::new(),
         debug,
     };
-    // The body runs in the root scope, so its assignments are the result's
-    // variables.
-    machine.enter(&program.body);
+    // The body (or the test) runs in the root scope, so its assignments are
+    // the result's variables.
+    machine.enter(entry);
     if machine.debug.is_some() {
         machine.drive::<true>().await?;
     } else {
@@ -101,6 +106,14 @@ enum Task<'p> {
     Object(&'p [(Arc<str>, Input)]),
     /// Make a list of the last this many values on the value stack.
     Array(usize),
+    /// Check the value against a type: `is` or `problems`.
+    Check(&'p Check, &'p Input),
+    /// Run the program's body with the variables on the value stack: a
+    /// test's `run`.
+    RunProgram(&'p [(Arc<str>, Input)], &'p Input),
+    /// Fail unless the value is `true`, or (with `eq`) the two values are
+    /// equal.
+    Expect(&'p Instruction),
     /// Assign the value to this variable in the current scope.
     Assign(&'p Arc<str>),
     /// End the current block with the value.
@@ -135,12 +148,14 @@ impl<'p> Task<'p> {
     }
 }
 
-/// A CodyScript function running: a frame of the call stack.
+/// A CodyScript function running — or, from a test's `run`, the program's
+/// body: a frame of the call stack.
 #[derive(Debug)]
 struct Invocation<'p> {
-    /// The `call` running it.
+    /// The `call` (or `run`) running it.
     call: &'p Input,
-    function: &'p Function,
+    /// The function; `None` for the program's body.
+    function: Option<&'p Function>,
     /// Where its scopes start.
     base: usize,
 }
@@ -152,7 +167,7 @@ fn frames<'a>(scopes: &'a [Variables], invocations: &'a [Invocation<'_>]) -> Vec
     let mut end = scopes.len();
     for invocation in invocations.iter().rev() {
         frames.push(Frame {
-            function: Some(&invocation.function.name),
+            function: invocation.function.map(|f| f.name.as_str()),
             call: Some(&invocation.call.path),
             scopes: &scopes[invocation.base..end],
         });
@@ -171,6 +186,10 @@ fn frames<'a>(scopes: &'a [Variables], invocations: &'a [Invocation<'_>]) -> Vec
 struct Machine<'p, 'd> {
     /// The program's functions, by index.
     functions: &'p [Function],
+    /// The types it declares, by index.
+    types: &'p [TypeDef],
+    /// Its body: what a test's `run` runs.
+    main: &'p Input,
     meter: Meter,
     /// How deeply calls may nest.
     max_depth: usize,
@@ -282,6 +301,11 @@ impl<'p> Machine<'p, '_> {
                 self.invocations.pop();
                 self.base = self.invocations.last().map_or(0, |i| i.base);
             }
+            Task::Check(check, node) => self.check(check, node)?,
+            Task::RunProgram(variables, node) => {
+                self.enter_call(node, None, variables, self.main)?;
+            }
+            Task::Expect(ins) => self.expect(ins)?,
             Task::External(..) => unreachable!("external calls are awaited by drive()"),
         }
         Ok(())
@@ -342,6 +366,19 @@ impl<'p> Machine<'p, '_> {
                 }
                 return Ok(());
             }
+            InputKind::Check(check) => {
+                self.tasks.push(Task::Check(check, input));
+                self.tasks.push(Task::Resolve(&check.value));
+                return Ok(());
+            }
+            InputKind::Run(variables) => {
+                // Like a call's arguments: each variable's value in turn.
+                self.tasks.push(Task::RunProgram(variables, input));
+                for (_, variable) in variables.iter().rev() {
+                    self.tasks.push(Task::Resolve(variable));
+                }
+                return Ok(());
+            }
         };
         self.values.push(value);
         Ok(())
@@ -392,6 +429,14 @@ impl<'p> Machine<'p, '_> {
                 self.tasks.push(Task::Loop { test, body });
                 test
             }
+            InstructionKind::Expect(expect) => {
+                // The value, then `eq`'s: the last pushed runs first.
+                self.tasks.push(Task::Expect(ins));
+                if let Some(eq) = &expect.eq {
+                    self.tasks.push(Task::Resolve(eq));
+                }
+                &expect.value
+            }
         };
         if DEBUGGED {
             self.tasks.push(Task::Resolve(input));
@@ -414,6 +459,21 @@ impl<'p> Machine<'p, '_> {
     /// variables of a fresh scope that the caller's can't be read through,
     /// and its body runs there until `EndCall`.
     fn invoke(&mut self, call: &'p Call, node: &'p Input) -> Result<(), Error> {
+        let function = &self.functions[call.function];
+        self.enter_call(node, Some(function), &call.args, &function.body)
+    }
+
+    /// Runs `body` — a function's, or the program's — as a call from `node`
+    /// (`function` names it): the values of `args`, on the value stack,
+    /// become the variables of a fresh scope that the caller's can't be read
+    /// through, and `body` runs there until `EndCall`.
+    fn enter_call(
+        &mut self,
+        node: &'p Input,
+        function: Option<&'p Function>,
+        args: &'p [(Arc<str>, Input)],
+        body: &'p Input,
+    ) -> Result<(), Error> {
         if self.invocations.len() >= self.max_depth {
             let message = format!("Calls nest deeper than {} levels", self.max_depth);
             let tag = node.tag.as_deref();
@@ -425,8 +485,7 @@ impl<'p> Machine<'p, '_> {
                 None,
             ));
         }
-        let variables = self.arguments(&call.args);
-        let function = &self.functions[call.function];
+        let variables = self.arguments(args);
         self.tasks.push(Task::EndCall);
         self.base = self.scopes.len();
         self.invocations.push(Invocation {
@@ -435,8 +494,71 @@ impl<'p> Machine<'p, '_> {
             base: self.base,
         });
         self.scopes.push(variables);
-        self.enter(&function.body);
+        self.enter(body);
         Ok(())
+    }
+
+    /// `is` or `problems`: the value checked against the type, a step for
+    /// each value looked at. Not inlined, like `expect`: kept out of the
+    /// loop, which every run pays for.
+    #[inline(never)]
+    fn check(&mut self, check: &'p Check, node: &'p Input) -> Result<(), Error> {
+        let value = self.pop();
+        let meter = &mut self.meter;
+        let found = types::problems(self.types, &value, &check.ty, || meter.step())
+            .map_err(|stop| self.meter.error(stop, &node.path, node.tag.as_deref()))?;
+        self.values.push(if check.problems {
+            Value::Array(found.into_iter().map(types::as_value).collect())
+        } else {
+            Value::Bool(found.is_empty())
+        });
+        Ok(())
+    }
+
+    /// `expect`: the value (and with `eq`, `eq`'s, on top) must be `true` —
+    /// or equal, as values are: lists item by item, objects field by field
+    /// in any order, numbers by value.
+    #[inline(never)]
+    fn expect(&mut self, ins: &'p Instruction) -> Result<(), Error> {
+        let InstructionKind::Expect(expect) = &ins.kind else {
+            unreachable!("an expect task is an expect instruction's");
+        };
+        let (input, eq) = (&expect.value, &expect.eq);
+        let tag = ins.tag.as_deref();
+        let (expected, value) = match eq {
+            Some(_) => {
+                let expected = self.pop();
+                (expected, self.pop())
+            }
+            None => match self.pop() {
+                Value::Bool(b) => (Value::Bool(true), Value::Bool(b)),
+                other => {
+                    let message = format!(
+                        "\"expect\" needs a boolean, or \"eq\" to compare with, got {}",
+                        expression::kind(&other)
+                    );
+                    let path = &input.path;
+                    return Err(failure(
+                        ErrorCode::TypeError,
+                        message,
+                        path,
+                        input.tag.as_deref(),
+                        None,
+                    ));
+                }
+            },
+        };
+        if value == expected {
+            return Ok(());
+        }
+        let message = format!("Expected {}, got {}", shown(&expected), shown(&value));
+        Err(failure(
+            ErrorCode::ExpectationFailed,
+            message,
+            &ins.path,
+            tag,
+            None,
+        ))
     }
 
     /// Starts a block: its own scope (unless it's the top-level one), a
@@ -562,6 +684,75 @@ impl<'p> Machine<'p, '_> {
     fn pop(&mut self) -> Value {
         self.values.pop().unwrap_or_default()
     }
+}
+
+/// How much of a value a failed `expect` shows, at most.
+const SHOWN: usize = 120;
+
+/// `value` written out for a message, in JSON's notation, cut short past
+/// [`SHOWN`] characters. Walks an explicit stack, and stops once it's long
+/// enough, so no value is too deep or too big to show.
+fn shown(value: &Value) -> String {
+    use std::fmt::Write;
+    enum Part<'v> {
+        Value(&'v Value),
+        Text(&'static str),
+        Key(&'v str),
+    }
+    let mut out = String::new();
+    let mut parts = vec![Part::Value(value)];
+    while let Some(part) = parts.pop() {
+        if out.len() > SHOWN {
+            break;
+        }
+        match part {
+            Part::Text(text) => out.push_str(text),
+            Part::Key(key) => {
+                let _ = write!(out, "{key:?}: ");
+            }
+            Part::Value(Value::Null) => out.push_str("null"),
+            Part::Value(Value::Bool(b)) => {
+                let _ = write!(out, "{b}");
+            }
+            Part::Value(Value::Number(n)) => {
+                let _ = write!(out, "{n}");
+            }
+            Part::Value(Value::String(s)) => {
+                let _ = write!(out, "{s:?}");
+            }
+            Part::Value(Value::Array(items)) => {
+                parts.push(Part::Text("]"));
+                for (i, item) in items.iter().enumerate().rev() {
+                    parts.push(Part::Value(item));
+                    if i > 0 {
+                        parts.push(Part::Text(", "));
+                    }
+                }
+                out.push('[');
+            }
+            Part::Value(Value::Object(map)) => {
+                parts.push(Part::Text("}"));
+                let entries: Vec<_> = map.iter().collect();
+                for (i, (key, item)) in entries.into_iter().enumerate().rev() {
+                    parts.push(Part::Value(item));
+                    parts.push(Part::Key(key));
+                    if i > 0 {
+                        parts.push(Part::Text(", "));
+                    }
+                }
+                out.push('{');
+            }
+        }
+    }
+    if out.len() > SHOWN || !parts.is_empty() {
+        let end = (0..=SHOWN.min(out.len()))
+            .rev()
+            .find(|&i| out.is_char_boundary(i))
+            .unwrap_or(0);
+        out.truncate(end);
+        out.push('…');
+    }
+    out
 }
 
 /// A variable, from the innermost scope that has it.

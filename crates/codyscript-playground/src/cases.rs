@@ -326,6 +326,33 @@ fn cases() -> Vec<Case> {
             .variables(value!({ "n": 9_999 }))
             .limits(value!({ "max_depth": 10_000, "max_steps": 10_000_000 }))
             .returns(value!(49_995_000)),
+        case(
+            "Types: a value's problems, each where it is; expect holds",
+            &value!({
+                "types": {
+                    "Todo": { "obj": { "title": "string", "tags": { "list": "string" }, "due": "string?" } }
+                },
+                "do": [
+                    { "set": { "found": { "problems": { "ref": "todo" }, "type": "Todo" } } },
+                    { "expect": { "is": { "val": { "title": "a", "tags": [] } }, "type": "Todo" } },
+                    { "ret": { "ref": "found" } }
+                ]
+            }),
+        )
+        .variables(value!({ "todo": { "title": 1, "tags": ["a", 2], "extra": true } }))
+        .returns(value!([
+            { "path": "/extra", "message": "Unknown field \"extra\"" },
+            { "path": "/title", "message": "Expected a string, got number" },
+            { "path": "/tags/1", "message": "Expected a string, got number" }
+        ])),
+        case(
+            "A failing expect fails the run, saying what it got",
+            &value!({ "do": [{ "expect": { "x": "1 + 1" }, "eq": 3, "tag": "sum" }] }),
+        )
+        .fails(
+            "expectation_failed",
+            "Expected 3, got 2 at /do/0 (tag sum)",
+        ),
         case("The module still works after all that", &readme)
             .variables(value!({ "Name": " again " }))
             .returns(value!("again")),

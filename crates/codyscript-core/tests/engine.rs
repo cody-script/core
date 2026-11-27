@@ -1380,6 +1380,16 @@ mod stack {
             assert!(run(&engine(), &objects).is_ok());
             assert!(run(&engine(), &lists).is_ok());
 
+            // A type nests like any node: as deep as the limit allows, with
+            // a value as deep checked against it.
+            let (mut ty, mut item) = (value!("number"), value!(1));
+            for _ in 0..126 {
+                ty = value!({ "list": ty });
+                item = Value::Array(vec![item]);
+            }
+            let typed = value!({ "types": { "Deep": ty }, "is": { "val": item }, "type": "Deep" });
+            assert_eq!(run(&engine(), &typed).unwrap().value, true);
+
             // Calls nest on the machine's own stacks, not the thread's.
             let countdown = with_fn(
                 call("down", value!({ "n": 127 })),

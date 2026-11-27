@@ -65,8 +65,8 @@ its answer, which it may give whenever it likes, from a promise:
 ```js
 const config = '{ "variables": { "Name": " Ada " }, "breakpoints": [{ "tag": "name-required" }] }';
 const outcome = JSON.parse(await debug(programJson, config, executors, "", (pause) => {
-  // pause: { reason, path, kind, name?, tag?, function?, depth, steps, breakpoints,
-  //          frames: [{ function?, call?, scopes: [{…}, …] }, …] }
+  // pause: { reason, path, kind, name?, tag?, function?, test?, depth, steps,
+  //          breakpoints, frames: [{ function?, call?, scopes: [{…}, …] }, …] }
   show(pause);                                  // your UI
   return new Promise((resolve) => (onClick = resolve));   // "step_over", …
 }));
@@ -83,8 +83,8 @@ const outcome = JSON.parse(await debug(programJson, config, executors, "", (paus
   the actions it's given take it (`"step"`); with no breakpoints, never.
   `path` is the step's JSON Pointer, `kind` its node type
   (`"set"`, `"call"`, …), `frames` the call stack — the program's body
-  first, then each CodyScript function running, each with its scopes,
-  outermost first.
+  (or the test's) first, then each CodyScript function running (and the
+  program, when a test `run`s it), each with its scopes, outermost first.
 - `onPause` returns, or resolves to, `"step_over"`, `"step_into"`,
   `"continue"` or `"stop"` — or `{ action, breakpoints }` to replace the
   breakpoints as well (checked the same way). `"stop"` ends the run with an
@@ -94,9 +94,28 @@ const outcome = JSON.parse(await debug(programJson, config, executors, "", (paus
 
 `steps(program, executors, limits) → string` lists the steps breakpoints can
 name, compiling the program as `run` would: `{"ok":true,"steps":[{ path,
-kind, name?, tag?, function?, depth }, …]}` in the order written (the body's,
-then each function's), or `{"ok":false,"error":{…}}`. See the core's
-README, "Debugging", for what each action does.
+kind, name?, tag?, function?, test?, depth }, …]}` in the order written (the
+body's, each function's, then each test's), or `{"ok":false,"error":{…}}`.
+See the core's README, "Debugging", for what each action does.
+
+### Types and tests
+
+A program's `types` and `tests` (see the core's README) are reached the same
+way, each taking the program, executors and limits as `run` does:
+
+- `tests(program, executors, limits) → string`: `{"ok":true,"tests":[name,
+  …]}`, in the order written, or `{"ok":false,"error":{…}}`.
+- `test(program, name, variables, executors, limits) → Promise<string>`
+  runs one test, resolving as `run` does: it passed if the outcome is `ok`;
+  a failing `expect` is an `expectation_failed` error at it. Pass fresh
+  executors to give each test its own (a database, say).
+- `debugTest(program, name, config, executors, limits, onPause) →
+  Promise<string>` debugs one, as `debug` does a program.
+- `problems(program, type, value, executors, limits) → string` checks
+  `value` (JSON text) against one of the program's types:
+  `{"ok":true,"problems":[{ path, message }, …]}`, empty if it is one.
+
+Each throws (or rejects) if the program has no such test or type.
 
 ## Building
 
@@ -128,7 +147,8 @@ dependencies never become this one's.
 engine — through these bindings (JavaScript functions, sync, async and
 throwing, and calls between them and CodyScript functions; the event loop
 driving a run; JSON in and out; programs compiled once and run many times;
-debugging with a JavaScript `onPause`) and through the core
+debugging with a JavaScript `onPause`; a program's tests and types) and
+through the core
 directly (the blocking runner, signals), plus stack-depth checks under
 WebAssembly's 1 MiB stack.
 
