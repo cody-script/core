@@ -347,6 +347,89 @@ pub fn valid() -> Vec<(&'static str, Value)> {
             "every root field, on an expression",
             value!({ "ext": { "math": ["add"] }, "fn": { "f": 1 }, "x": "1", "tag": "t" }),
         ),
+        // Types, and checking values against them.
+        (
+            "types: objects, lists and maps, by name and inline, optional and recursive",
+            value!({
+                "types": {
+                    "Todo": {
+                        "obj": {
+                            "id": "integer",
+                            "title": "string",
+                            "done": "boolean",
+                            "tags": { "list": "string" },
+                            "due": "string?",
+                            "owner": "Person?",
+                            "extra": "any"
+                        },
+                        "tag": "t"
+                    },
+                    "Person": { "obj": { "name": "string", "friends": { "list": "Person" } } },
+                    "Index": { "map": "Todo" },
+                    "Name": "string",
+                    "Anything": { "list": "list" }
+                },
+                "do": [
+                    { "if": { "is": { "ref": "x" }, "type": "Todo" }, "do": [{ "ret": true }] },
+                    { "ret": { "problems": { "ref": "x" }, "type": "Index", "tag": "p" } }
+                ]
+            }),
+        ),
+        (
+            "a check against an inline type, built-ins only",
+            value!({ "is": { "val": [1, null] }, "type": { "list": "number?" } }),
+        ),
+        (
+            "every built-in type",
+            value!({ "list": [
+                { "is": 1, "type": "any" },
+                { "is": 1, "type": "null" },
+                { "is": 1, "type": "boolean" },
+                { "is": 1, "type": "number" },
+                { "is": 1, "type": "integer" },
+                { "is": 1, "type": "string" },
+                { "is": 1, "type": "list" },
+                { "is": 1, "type": "object" },
+                { "is": 1, "type": { "obj": {} } }
+            ] }),
+        ),
+        // Expectations, and tests.
+        (
+            "expect, on its own and with eq",
+            m(vec![
+                value!({ "expect": true }),
+                value!({ "expect": { "x": "1 + 1" }, "eq": 2, "tag": "e" }),
+            ]),
+        ),
+        (
+            "tests that call the program's functions and run it",
+            value!({
+                "fn": { "double": { "x": "n * 2" } },
+                "ext": { "math": ["add"] },
+                "tests": {
+                    "doubles": { "do": [
+                        { "expect": { "call": { "double": { "n": 2 } } }, "eq": 4 }
+                    ] },
+                    "runs the program": { "do": [
+                        { "set": { "out": { "run": { "x": 3 }, "tag": "r" } } },
+                        { "expect": { "x": "out == 3" } }
+                    ] },
+                    "adds": { "call": { "math.add": { "a": 1, "b": 2 } } },
+                    "a bare value": true
+                },
+                "ref": "x"
+            }),
+        ),
+        (
+            "every root field",
+            value!({
+                "ext": { "math": ["add"] },
+                "fn": { "f": 1 },
+                "types": { "T": "string" },
+                "tests": { "t": { "do": [{ "expect": { "run": {} }, "eq": null }] } },
+                "do": []
+            }),
+        ),
     ]
 }
 
@@ -577,6 +660,114 @@ pub fn invalid() -> Vec<(&'static str, Value, &'static str)> {
             "a main function, which 0.6 has no need of",
             value!({ "fn": { "main": { "do": [] } } }),
             "",
+        ),
+        // Types.
+        (
+            "types that isn't an object",
+            value!({ "types": [], "do": [] }),
+            "/types",
+        ),
+        (
+            "a type with no type key",
+            value!({ "types": { "A": { "lst": "string" } }, "do": [] }),
+            "/types/A",
+        ),
+        (
+            "a type with two type keys",
+            value!({ "types": { "A": { "list": "string", "map": "string" } }, "do": [] }),
+            "/types/A",
+        ),
+        (
+            "a type that's a number",
+            value!({ "types": { "A": 1 }, "do": [] }),
+            "/types/A",
+        ),
+        (
+            "an object type whose field isn't a type",
+            value!({ "types": { "A": { "obj": { "a": [1] } } }, "do": [] }),
+            "/types/A/obj/a",
+        ),
+        (
+            "an object type that isn't an object of types",
+            value!({ "types": { "A": { "obj": ["string"] } }, "do": [] }),
+            "/types/A/obj",
+        ),
+        (
+            "a type with an extra field",
+            value!({ "types": { "A": { "list": "string", "of": 1 } }, "do": [] }),
+            "/types/A/of",
+        ),
+        (
+            "an empty type name",
+            value!({ "types": { "": "string" }, "do": [] }),
+            "/types/",
+        ),
+        (
+            "a type named like an optional one",
+            value!({ "types": { "A?": "string" }, "do": [] }),
+            "/types/A?",
+        ),
+        (
+            "a type named like a built-in",
+            value!({ "types": { "string": "number" }, "do": [] }),
+            "/types/string",
+        ),
+        (
+            "types below the root",
+            m(vec![ret(value!({ "types": {}, "do": [] }))]),
+            "/do/0/ret/types",
+        ),
+        ("a check with no type", value!({ "is": 1 }), "/type"),
+        (
+            "a check whose type isn't one",
+            value!({ "problems": 1, "type": [] }),
+            "/type",
+        ),
+        (
+            "a check with an extra field",
+            value!({ "is": 1, "type": "string", "eq": 1 }),
+            "/eq",
+        ),
+        // Expectations, and tests.
+        (
+            "an expectation with an extra field",
+            m(vec![value!({ "expect": true, "el": [] })]),
+            "/do/0/el",
+        ),
+        (
+            "an expectation that isn't an input",
+            m(vec![value!({ "expect": [true] })]),
+            "/do/0/expect",
+        ),
+        (
+            "tests that isn't an object",
+            value!({ "tests": [], "do": [] }),
+            "/tests",
+        ),
+        (
+            "an empty test name",
+            value!({ "tests": { "": 1 }, "do": [] }),
+            "/tests/",
+        ),
+        (
+            "a test that isn't an input",
+            value!({ "tests": { "t": [1] }, "do": [] }),
+            "/tests/t",
+        ),
+        (
+            "a test that is an instruction",
+            value!({ "tests": { "t": { "expect": true } }, "do": [] }),
+            "/tests/t",
+        ),
+        (
+            "tests below the root",
+            m(vec![ret(value!({ "tests": {}, "do": [] }))]),
+            "/do/0/ret/tests",
+        ),
+        (
+            "a run whose variables aren't an object",
+            value!({ "tests": { "t": { "run": [] } }, "do": [] }),
+            "/tests/t/run",
         ),
     ]
 }

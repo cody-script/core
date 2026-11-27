@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::block_on::block_on;
 use crate::config::RunConfig;
 use crate::debug::{self, Breakpoint, Debugger, Step};
-use crate::error::Error;
+use crate::error::{Error, Issue};
 use crate::executor::{Executor, ExecutorCall, ExecutorResult, Signal, from_async_fn, from_fn};
 use crate::program::Program;
 use crate::run;
+use crate::types::{self, Type};
 use crate::validate::validate;
 use crate::value::{Map, Value};
 
@@ -233,7 +234,7 @@ impl Engine {
     /// [`compile`](Engine::compile) it once instead.
     pub async fn run(&self, program: &Value, options: RunOptions<'_>) -> Result<RunResult, Error> {
         let root = self.tree(program)?;
-        run::run(&root, self.inner.limits, options).await
+        run::run(&root, &root.body, self.inner.limits, options).await
     }
 
     /// [`run`](Engine::run), blocking the current thread until it finishes.
@@ -373,7 +374,7 @@ impl CompiledProgram {
     /// Runs the program — under a debugger, if `options` has one (see
     /// [`RunOptions::with_debugger`]).
     pub async fn run(&self, options: RunOptions<'_>) -> Result<RunResult, Error> {
-        run::run(&self.root, self.engine.limits, options).await
+        run::run(&self.root, &self.root.body, self.engine.limits, options).await
     }
 
     /// Checks a run configuration against the program: each of its
@@ -385,7 +386,7 @@ impl CompiledProgram {
 
     /// Every step of the program — each node a run can pause before, and a
     /// breakpoint can name — in the order written: its body's, then each
-    /// function's in `fn`.
+    /// function's in `fn`, then each test's in `tests`.
     pub fn steps(&self) -> Vec<Step<'_>> {
         debug::steps(&self.root)
     }
@@ -396,6 +397,93 @@ impl CompiledProgram {
     /// from within that runtime for those.
     pub fn run_blocking(&self, options: RunOptions<'_>) -> Result<RunResult, Error> {
         block_on(self.run(options))
+    }
+
+    /// The program's tests (`tests`), in the order written.
+    pub fn tests(&self) -> impl ExactSizeIterator<Item = Test<'_>> {
+        (0..self.root.tests.len()).map(|index| Test {
+            program: self,
+            index,
+        })
+    }
+
+    /// The test called `name`, if the program has one.
+    pub fn test(&self, name: &str) -> Option<Test<'_>> {
+        let index = self.root.tests.iter().position(|t| t.name == name)?;
+        Some(Test {
+            program: self,
+            index,
+        })
+    }
+
+    /// The names of the types the program declares (`types`), in the order
+    /// written.
+    pub fn types(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.root.types.iter().map(|def| def.name.as_str())
+    }
+
+    /// What's wrong with `value` as the program's type `name` — nothing, if
+    /// it is one: each problem's `path` is a JSON Pointer into `value`, and
+    /// they're in the order found, at most 100. `None` if the program
+    /// declares no such type.
+    ///
+    /// What a program's `problems` gives, as a host would check a value
+    /// before running it with one (a request's body, say).
+    pub fn problems(&self, value: &Value, name: &str) -> Option<Vec<Issue>> {
+        let index = self.root.types.iter().position(|def| def.name == name)?;
+        let ty = Type::Named(index);
+        // Nothing stops a host's check: it's as big as the value.
+        let found = types::problems(&self.root.types, value, &ty, || {
+            Ok::<(), std::convert::Infallible>(())
+        });
+        Some(found.unwrap_or_else(|never| match never {}))
+    }
+}
+
+/// One of a program's tests: a program of its own, which passes if it runs
+/// to the end — without an `expect` failing, or any other error. From
+/// [`CompiledProgram::tests`] or [`CompiledProgram::test`].
+///
+/// A test runs like the program: with the engine's executors (to give each
+/// test fresh ones — a database of its own, say — compile the program with
+/// an engine built for it), the variables and limits it's given, and a
+/// debugger if there's one. Only a test may `run` the program itself.
+#[derive(Clone, Copy)]
+pub struct Test<'p> {
+    program: &'p CompiledProgram,
+    index: usize,
+}
+
+impl<'p> Test<'p> {
+    /// Its name, as `tests` has it.
+    pub fn name(&self) -> &'p str {
+        &self.program.root.tests[self.index].name
+    }
+
+    /// Runs the test — under a debugger, if `options` has one. It passed if
+    /// this is `Ok`; an `expect` that fails is an `expectation_failed`.
+    pub async fn run(&self, options: RunOptions<'_>) -> Result<RunResult, Error> {
+        let program = self.program;
+        let root = &program.root;
+        run::run(
+            root,
+            &root.tests[self.index].body,
+            program.engine.limits,
+            options,
+        )
+        .await
+    }
+
+    /// [`run`](Test::run), blocking the current thread until it finishes
+    /// (see [`CompiledProgram::run_blocking`]).
+    pub fn run_blocking(&self, options: RunOptions<'_>) -> Result<RunResult, Error> {
+        block_on(self.run(options))
+    }
+}
+
+impl fmt::Debug for Test<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Test").field("name", &self.name()).finish()
     }
 }
 

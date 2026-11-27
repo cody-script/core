@@ -47,9 +47,13 @@ fn accepts_every_program_in_the_readmes() {
         .into_iter()
         .flat_map(support::readme_json_blocks)
         .map(|(_, json)| json)
-        .filter(|json| json.get("do").is_some() || json.get("fn").is_some())
+        .filter(|json| {
+            ["do", "fn", "types", "tests"]
+                .iter()
+                .any(|k| json.get(k).is_some())
+        })
         .collect();
-    assert_eq!(programs.len(), 4);
+    assert_eq!(programs.len(), 6);
     for program in programs {
         assert!(
             validator.is_valid(&to_serde_json(&program)),

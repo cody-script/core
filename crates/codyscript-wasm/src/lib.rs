@@ -145,9 +145,9 @@ pub async fn run(
 ///
 /// Takes `program`, `executors` and `limits` as [`run`] does (a program is
 /// compiled, so its `ext` is checked against the executors). Returns JSON
-/// text: `{"ok":true,"steps":[{"path","kind","name"?,"tag"?,"depth"},…]}`
-/// — in the order written, the body's and then each function's — or
-/// `{"ok":false,"error":{…}}` for a program that doesn't compile.
+/// text: `{"ok":true,"steps":[{"path","kind","name"?,"tag"?,"function"?,"test"?,"depth"},…]}`
+/// — in the order written: the body's, each function's, then each test's —
+/// or `{"ok":false,"error":{…}}` for a program that doesn't compile.
 #[wasm_bindgen]
 pub fn steps(program: String, executors: JsValue, limits: String) -> Result<String, JsError> {
     #[derive(Serialize)]
@@ -176,8 +176,8 @@ pub fn steps(program: String, executors: JsValue, limits: String) -> Result<Stri
 /// [`runConfigSchema`](run_config_schema)); and `onPause`, a function the
 /// run calls each time it pauses before a step: at a breakpoint (`reason`
 /// `"breakpoint"`), or where stepping ends (`"step"`) — nowhere else. It
-/// receives `{ reason, path, kind, name?, tag?, function?, depth, steps,
-/// frames: [{ function?, call?, scopes }], breakpoints }` — the step, as
+/// receives `{ reason, path, kind, name?, tag?, function?, test?, depth,
+/// steps, frames: [{ function?, call?, scopes }], breakpoints }` — the step, as
 /// [`steps`] lists it, and more — and returns, or resolves to (taking as
 /// long as it likes), how to go on: `"step_over"`, `"step_into"`,
 /// `"continue"` or `"stop"`, or `{ action, breakpoints? }` to change the
@@ -251,6 +251,135 @@ pub fn check(
 #[wasm_bindgen(js_name = "runConfigSchema")]
 pub fn run_config_schema() -> String {
     codyscript_json::RUN_CONFIG_SCHEMA.into()
+}
+
+/// Lists a program's tests (`tests`), by name, in the order written.
+///
+/// Takes `program`, `executors` and `limits` as [`run`] does. Returns JSON
+/// text: `{"ok":true,"tests":["…",…]}`, or `{"ok":false,"error":{…}}` for a
+/// program that doesn't compile.
+#[wasm_bindgen]
+pub fn tests(program: String, executors: JsValue, limits: String) -> Result<String, JsError> {
+    #[derive(Serialize)]
+    struct Listed<'a> {
+        ok: bool,
+        tests: Vec<&'a str>,
+    }
+    let json = match compile_program(&program, &executors, &limits)? {
+        Ok(compiled) => codyscript_json::to_string(&Listed {
+            ok: true,
+            tests: compiled.tests().map(|test| test.name()).collect(),
+        }),
+        Err(error) => codyscript_json::to_string(&Failed {
+            ok: false,
+            error: &error,
+        }),
+    };
+    json.map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Runs one of a program's tests: it passed if the outcome is `ok`. A
+/// failing `expect` is an `expectation_failed` error, at the `expect`.
+///
+/// Takes `program`, `variables` (the test's, JSON text of an object, or
+/// `""` for none), `executors` and `limits` as [`run`] does, and the test's
+/// `name`. Resolves and rejects as `run` does — and rejects if the program
+/// has no such test.
+#[wasm_bindgen]
+pub async fn test(
+    program: String,
+    name: String,
+    variables: String,
+    executors: JsValue,
+    limits: String,
+) -> Result<String, JsError> {
+    let variables: Variables = parse_or_default(&variables, "variables")?;
+    let outcome = match compile_program(&program, &executors, &limits)? {
+        Ok(compiled) => {
+            let test = compiled
+                .test(&name)
+                .ok_or_else(|| JsError::new(&format!("the program has no test \"{name}\"")))?;
+            test.run(RunOptions::from(variables)).await
+        }
+        Err(error) => Err(error),
+    };
+    outcome_json(&outcome).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Runs one of a program's tests under a debugger written in JavaScript, as
+/// [`debug`] runs a program: `config`'s variables are the test's, and its
+/// breakpoints may name any step (the test's own, the program's it `run`s,
+/// a function's). Takes the test's `name` as [`test`](fn@test) does, and
+/// rejects as it does too.
+#[wasm_bindgen(js_name = "debugTest")]
+pub async fn debug_test(
+    program: String,
+    name: String,
+    config: String,
+    executors: JsValue,
+    limits: String,
+    #[wasm_bindgen(js_name = "onPause")] on_pause: Function,
+) -> Result<String, JsError> {
+    let RunConfig {
+        variables,
+        breakpoints,
+    } = parse_or_default(&config, "config")?;
+    let mut debugger = JsDebugger {
+        on_pause: SendWrapper::new(on_pause),
+        failure: None,
+    };
+    let outcome = match compile_program(&program, &executors, &limits)? {
+        Ok(compiled) => {
+            let test = compiled
+                .test(&name)
+                .ok_or_else(|| JsError::new(&format!("the program has no test \"{name}\"")))?;
+            let options = RunOptions::from(variables).with_debugger(breakpoints, &mut debugger);
+            test.run(options).await
+        }
+        Err(error) => Err(error),
+    };
+    if let Some(failure) = debugger.failure {
+        return Err(JsError::new(&format!("onPause: {failure}")));
+    }
+    outcome_json(&outcome).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// What's wrong with a value as one of a program's types (`types`).
+///
+/// Takes `program`, `executors` and `limits` as [`run`] does, the type's
+/// `name`, and `value` as JSON text. Returns JSON text:
+/// `{"ok":true,"problems":[{"path","message"},…]}` — none, if it is one;
+/// each `path` a JSON Pointer into `value` — or `{"ok":false,"error":{…}}`
+/// for a program that doesn't compile. Throws if `value` isn't JSON, or the
+/// program has no such type.
+#[wasm_bindgen]
+pub fn problems(
+    program: String,
+    name: String,
+    value: String,
+    executors: JsValue,
+    limits: String,
+) -> Result<String, JsError> {
+    #[derive(Serialize)]
+    struct Checked {
+        ok: bool,
+        problems: Vec<codyscript_core::Issue>,
+    }
+    let value: Value =
+        codyscript_json::from_str(&value).map_err(|e| JsError::new(&format!("value: {e}")))?;
+    let json = match compile_program(&program, &executors, &limits)? {
+        Ok(compiled) => {
+            let problems = compiled
+                .problems(&value, &name)
+                .ok_or_else(|| JsError::new(&format!("the program has no type \"{name}\"")))?;
+            codyscript_json::to_string(&Checked { ok: true, problems })
+        }
+        Err(error) => codyscript_json::to_string(&Failed {
+            ok: false,
+            error: &error,
+        }),
+    };
+    json.map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// `program` compiled by an engine with `executors` and `limits`: a

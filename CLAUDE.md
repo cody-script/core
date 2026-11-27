@@ -8,7 +8,8 @@ CodyScript has its own semantics, and prefers Rust's to JavaScript's —
 where something is done a certain way only because JavaScript does it, the
 Rust way (cleaner, faster) wins. Every call is a `call` of a function,
 declared in the root's `ext` (the host's) or defined in its `fn`
-(CodyScript's).
+(CodyScript's); beside them, the root may declare `types` and carry
+`tests`.
 README.md is the overview; each crate's README is its rustdoc front page
 (the core's is the language reference). This file is the working guide.
 
@@ -57,11 +58,16 @@ crates/
                      #   before each step whether a run pauses, pauses it,
                      #   and says whether it goes on
       validate.rs    # One walk: shape, finite numbers, depth,
-                     #   root-only `fn`/`ext`, what each call names, the
-                     #   host's functions, expression syntax; builds the tree
+                     #   root-only `fn`/`ext`/`types`/`tests`, what each call
+                     #   and type names, the host's functions, `run` only in
+                     #   tests, expression syntax; builds the tree
       program.rs     # The validated program tree (crate-private): a
-                     #   Program is its body and its `fn` functions; a call
-                     #   is resolved to an External or a function index
+                     #   Program is its body, its `fn` functions, its types
+                     #   and its tests; a call is resolved to an External or
+                     #   a function index, a type name to a TypeDef index
+      types.rs       # Types (crate-private): Type, TypeDef, and checking a
+                     #   value against one (`problems`) with an explicit
+                     #   stack, a step per value looked at
       expression.rs  # The `x` language: tokenizer, parser, evaluator
       executor.rs    # Executor trait, ExecutorCall (op/arg/tag shared with the
                      #   tree), ExecutorFuture (no box for a sync result),
@@ -73,6 +79,8 @@ crates/
                      #   (shared with codyscript-json's tests via #[path])
       engine.rs, validate.rs, expression.rs  # begun as ports of the TypeScript tests
       debug.rs       # pausing, stepping, breakpoints, the step list
+      types.rs       # types, is/problems, CompiledProgram::problems
+      testing.rs     # tests, expect, run, Test; debugging a test
       data.rs        # format independence: serde tokens, CBOR end to end
   codyscript-json/   # The JSON adapter. Depends on core + serde_json.
     src/lib.rs       # from_str/to_string…, EngineJsonExt::compile_json,
@@ -95,7 +103,8 @@ crates/
                      #   JavaScript; executors are objects of JavaScript
                      #   functions ({ text: { trim } }), bridged via send_wrapper;
                      #   debug(program, config, …, onPause), steps(…),
-                     #   check(…) and runConfigSchema() for debugging
+                     #   check(…) and runConfigSchema() for debugging;
+                     #   tests(…), test(…), debugTest(…) and problems(…)
     tests/web.rs     # wasm-bindgen-test: Node by default, browsers too
     npm/             # the npm package @cody-script/core-wasm: build.sh,
                      #   package.json template, README, smoke.mjs (Node)
@@ -190,7 +199,7 @@ closures already work with `async_executor`.
 - **Everything called is a function.** The root node — any input — may
   carry `fn` (CodyScript functions, each a program itself) and `ext` (the
   host's functions it uses, by executor: `{ "text": ["trim"] }`); both
-  only there. `call` calls either; a name is in one or the other, never
+  only there (as are `types` and `tests`). `call` calls either; a name is in one or the other, never
   both; only external calls take `arg`. Hosts register each executor with
   the functions it provides, so `compile` checks `ext` exactly
   (`unknown_function`) — keep that: a program's `ext` is its whole reach
@@ -229,6 +238,15 @@ closures already work with `async_executor`.
   the host's. A breakpoint names steps by `tag` (preferred: edits don't
   move it) or `path`, and one that names no step is an `invalid_config`
   error, whenever breakpoints are set — never silently ignored.
+- **Types and tests live in the program**, so any host can use them.
+  `types` declares types by name (`obj` — strict: unknown fields are
+  problems — `list`, `map`, built-in names, `T?`); `is`/`problems` check a
+  value against one, a step per value looked at, without recursing, at
+  most 100 problems. `tests` are programs of their own: a test passes if it
+  runs to the end; `expect` (an instruction, allowed anywhere) fails a run
+  with `expectation_failed`; `run` (only in tests, which `validate`
+  enforces) runs the program's body as a call, in a fresh scope of the
+  variables it names. Running the program never touches its tests.
 - **Values are format-neutral.** `Number` holds any `f64` (formats like CBOR
   carry `NaN`); `compile` refuses non-finite numbers in programs, number
   literals in expressions included. `Map` keeps insertion order — it
@@ -254,8 +272,10 @@ closures already work with `async_executor`.
 - **Errors are `codyscript_core::Error`** with a code, a JSON Pointer path
   and the node's tag. Adding an `ErrorCode` is a public API change —
   document it in the core README.
-- The top-level README's first `json` block is executed by
-  `codyscript-json/tests/readme.rs`; every README's `rust` blocks are doc
+- The top-level README's first `json` block, and the core README's
+  functions, types and tests examples, are executed by
+  `codyscript-json/tests/readme.rs`, and `tests/schema.rs` checks every
+  README program against the schema; every README's `rust` blocks are doc
   tests. Keep them runnable.
 
 Keep this file accurate. An out-of-date CLAUDE.md is worse than none.

@@ -1,7 +1,8 @@
 //! Checks a program in one walk — shape, unknown fields, finite numbers,
-//! nesting depth, the functions it defines and declares, what
-//! every call names and every expression's syntax — reporting every problem,
-//! and builds the tree the engine runs.
+//! nesting depth, the functions it defines and declares, the types it
+//! declares, what every call and type names, every expression's syntax, and
+//! that only tests `run` the program — reporting every problem, and builds
+//! the tree the engine runs.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -13,8 +14,10 @@ use crate::error::{Details, Error, ErrorCode, Issue};
 use crate::executor::Executor;
 use crate::expression::{Ast, parse};
 use crate::program::{
-    Call, External, Function, Input, InputKind, Instruction, InstructionKind, Program,
+    Call, Check, Expect, External, Function, Input, InputKind, Instruction, InstructionKind,
+    Program, Test,
 };
+use crate::types::{BUILT_IN, Type, TypeDef};
 use crate::value::{Map, Value};
 
 /// Node types by the key that names them, with the other fields each may
@@ -29,19 +32,28 @@ const INPUTS: Kinds = &[
     ("do", &[]),
     ("obj", &[]),
     ("list", &[]),
+    ("is", &["type"]),
+    ("problems", &["type"]),
+    ("run", &[]),
 ];
 const INSTRUCTIONS: Kinds = &[
     ("set", &[]),
     ("ret", &[]),
     ("if", &["do", "el"]),
     ("for", &["do"]),
+    ("expect", &["eq"]),
 ];
+/// A type that isn't a name: an `obj`, `list` or `map` of types.
+const TYPE_KINDS: Kinds = &[("obj", &[]), ("list", &[]), ("map", &[])];
 
 /// The fields only a program's root may carry, besides its own: the
-/// CodyScript functions it defines, and the external functions it declares.
+/// CodyScript functions it defines, the external functions it declares, the
+/// types it declares, and its tests.
 const FUNCTIONS: &str = "fn";
 const EXTERNALS: &str = "ext";
-const ROOT_FIELDS: &[&str] = &[FUNCTIONS, EXTERNALS];
+const TYPES: &str = "types";
+const TESTS: &str = "tests";
+const ROOT_FIELDS: &[&str] = &[FUNCTIONS, EXTERNALS, TYPES, TESTS];
 
 /// Escapes one JSON Pointer (RFC 6901) reference token. Most keys need no
 /// escaping, and aren't copied.
@@ -135,10 +147,13 @@ pub(crate) fn validate(
         expressions: HashMap::new(),
         functions: HashMap::new(),
         externals: HashMap::new(),
+        types: HashMap::new(),
+        in_test: false,
         issues: Vec::new(),
     };
-    // Every name a call may use is known before any call is checked, so
-    // functions may be defined in any order and call each other.
+    // Every name a call or a type may use is known before any is checked,
+    // so functions and types may be declared in any order, and name each
+    // other (or themselves).
     let root = program.as_object();
     if let Some(ext) = root.and_then(|map| map.get(EXTERNALS)) {
         walk.externals(ext);
@@ -146,14 +161,31 @@ pub(crate) fn validate(
     let table = root
         .and_then(|map| map.get(FUNCTIONS))
         .and_then(|table| walk.function_names(table));
+    let type_table = root
+        .and_then(|map| map.get(TYPES))
+        .and_then(|table| walk.type_names(table));
     let body = walk.node(program, String::new(), 0, ROOT_FIELDS);
     let functions = match table {
         Some(table) => walk.function_bodies(table),
         None => Some(Vec::new()),
     };
-    let root = body
-        .zip(functions)
-        .map(|(body, functions)| Program { body, functions });
+    let types = match type_table {
+        Some(table) => walk.type_defs(table),
+        None => Some(Vec::new()),
+    };
+    let tests = match root.and_then(|map| map.get(TESTS)) {
+        Some(tests) => walk.tests(tests),
+        None => Some(Vec::new()),
+    };
+    let root = match (body, functions, types, tests) {
+        (Some(body), Some(functions), Some(types), Some(tests)) => Some(Program {
+            body,
+            functions,
+            types,
+            tests,
+        }),
+        _ => None,
+    };
     if let Some(first) = walk.issues.first() {
         let prefix = if first.code == ErrorCode::InvalidProgram {
             "Invalid program: "
@@ -195,6 +227,11 @@ struct Walk<'a> {
     /// The external functions it declares (`ext`) by full name
     /// (`text.trim`).
     externals: HashMap<String, Declared>,
+    /// The types it declares (`types`) by name, with their index.
+    types: HashMap<String, usize>,
+    /// Whether the nodes being checked are a test's: only a test may `run`
+    /// the program.
+    in_test: bool,
     issues: Vec<RawIssue>,
 }
 
@@ -480,6 +517,165 @@ impl Walk<'_> {
         functions
     }
 
+    /// `types`' names: `{ <name>: <type>, … }`, the types the program
+    /// declares. Returns the table, for [`type_defs`](Self::type_defs) to
+    /// check once every name is known.
+    fn type_names<'v>(&mut self, table: &'v Value) -> Option<&'v Map> {
+        let path = child("", TYPES);
+        let table = self.record(table, &path, 1, None)?;
+        for (index, name) in table.keys().enumerate() {
+            let problem = if name.is_empty() {
+                Some("Expected a non-empty name".to_owned())
+            } else if name.ends_with('?') {
+                Some(format!(
+                    "A type's name can't end with \"?\": \"{name}\" would read as an optional \"{}\"",
+                    name.trim_end_matches('?')
+                ))
+            } else if BUILT_IN.iter().any(|(built_in, _)| *built_in == name) {
+                Some(format!("\"{name}\" is a built-in type"))
+            } else {
+                None
+            };
+            match problem {
+                Some(message) => self.fail(child(&path, name), message),
+                None => {
+                    self.types.insert(name.to_owned(), index);
+                }
+            }
+        }
+        Some(table)
+    }
+
+    /// Every type in `types`, in order; `None` if any is invalid (each is
+    /// checked, even after one fails) — or is only itself, through names
+    /// and `?`s alone, with no object, list or map to hold it.
+    fn type_defs(&mut self, table: &Map) -> Option<Vec<TypeDef>> {
+        let path = child("", TYPES);
+        let mut defs = Some(Vec::with_capacity(table.len()));
+        for (name, ty) in table {
+            let ty = self.type_expr(ty, &child(&path, name), 2);
+            match (ty, defs.as_mut()) {
+                (Some(ty), Some(list)) => list.push(TypeDef {
+                    name: name.to_owned(),
+                    ty,
+                }),
+                _ => defs = None,
+            }
+        }
+        let defs = defs?;
+        let mut ok = true;
+        for (index, def) in defs.iter().enumerate() {
+            let mut seen = vec![index];
+            let mut ty = &def.ty;
+            loop {
+                match ty {
+                    Type::Optional(inner) => ty = inner,
+                    Type::Named(next) if seen.contains(next) => {
+                        if *next == index {
+                            let message = format!(
+                                "Type \"{}\" is only itself: an object, list or map has to hold it",
+                                def.name
+                            );
+                            self.fail(child(&path, &def.name), message);
+                            ok = false;
+                        }
+                        break;
+                    }
+                    Type::Named(next) => {
+                        seen.push(*next);
+                        ty = &defs[*next].ty;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        ok.then_some(defs)
+    }
+
+    /// A type: a name — one of [`BUILT_IN`] or one the program declares —
+    /// with `?` for optional, or `{ "obj": { <field>: <type>, … } }`,
+    /// `{ "list": <type> }` or `{ "map": <type> }`.
+    fn type_expr(&mut self, v: &Value, path: &str, depth: usize) -> Option<Type> {
+        if let Value::String(written) = v {
+            let (name, optional) = match written.strip_suffix('?') {
+                Some(name) => (name, true),
+                None => (written.as_str(), false),
+            };
+            let ty = BUILT_IN
+                .iter()
+                .find(|(built_in, _)| *built_in == name)
+                .map(|(_, ty)| ty.clone())
+                .or_else(|| self.types.get(name).map(|&index| Type::Named(index)));
+            let Some(ty) = ty else {
+                let message = if name.is_empty() {
+                    "Expected a type's name".to_owned()
+                } else {
+                    format!("Unknown type \"{name}\"")
+                };
+                self.fail(path.into(), message);
+                return None;
+            };
+            return Some(if optional {
+                Type::Optional(Box::new(ty))
+            } else {
+                ty
+            });
+        }
+        if !v.is_object() {
+            let message = "Expected a type: a name, or an object of \"obj\", \"list\" or \"map\"";
+            self.fail(path.into(), message);
+            return None;
+        }
+        let (ty, node) = self.header(v, path, depth, (TYPE_KINDS, "a type"), &[])?;
+        let inner = field(node, ty);
+        let at = child(path, ty);
+        match ty {
+            "obj" => {
+                let map = self.record(inner, &at, depth + 1, None)?;
+                let mut fields = Some(Vec::with_capacity(map.len()));
+                for (name, of) in map {
+                    let of = self.type_expr(of, &child(&at, name), depth + 2);
+                    match (of, fields.as_mut()) {
+                        (Some(of), Some(list)) => list.push((name.into(), of)),
+                        _ => fields = None,
+                    }
+                }
+                fields.map(Type::Obj)
+            }
+            "list" => self
+                .type_expr(inner, &at, depth + 1)
+                .map(|of| Type::ListOf(Box::new(of))),
+            _ => self
+                .type_expr(inner, &at, depth + 1)
+                .map(|of| Type::MapOf(Box::new(of))),
+        }
+    }
+
+    /// `tests`: `{ <name>: <input>, … }`, each a program of its own, which
+    /// alone may `run` the program; in order.
+    fn tests(&mut self, table: &Value) -> Option<Vec<Test>> {
+        let path = child("", TESTS);
+        let table = self.record(table, &path, 1, None)?;
+        let mut tests = Some(Vec::with_capacity(table.len()));
+        self.in_test = true;
+        for (name, body) in table {
+            if name.is_empty() {
+                self.fail(child(&path, name), "Expected a non-empty name");
+                tests = None;
+            }
+            let body = self.input(body, child(&path, name), 2);
+            match (body, tests.as_mut()) {
+                (Some(body), Some(list)) => list.push(Test {
+                    name: name.to_owned(),
+                    body,
+                }),
+                _ => tests = None,
+            }
+        }
+        self.in_test = false;
+        tests
+    }
+
     /// A literal (`null`, boolean, finite number, string) or an input node.
     fn input(&mut self, v: &Value, path: String, depth: usize) -> Option<Input> {
         self.node(v, path, depth, &[])
@@ -522,6 +718,28 @@ impl Walk<'_> {
             "list" => self
                 .items(field(node, "list"), &child(&path, "list"), depth + 1)
                 .map(InputKind::List),
+            "is" | "problems" => {
+                let value = self.input(field(node, ty), child(&path, ty), depth + 1);
+                let checked = self.type_expr(field(node, "type"), &child(&path, "type"), depth + 1);
+                value.zip(checked).map(|(value, ty_)| {
+                    InputKind::Check(Box::new(Check {
+                        value,
+                        ty: ty_,
+                        problems: ty == "problems",
+                    }))
+                })
+            }
+            "run" => {
+                let variables = self.arguments(field(node, "run"), &child(&path, "run"), depth + 1);
+                if !self.in_test {
+                    self.fail(
+                        child(&path, "run"),
+                        "\"run\" runs the program from one of its tests: only a test may",
+                    );
+                    return None;
+                }
+                variables.map(InputKind::Run)
+            }
             _ => self
                 .block(field(node, "do"), &child(&path, "do"), depth + 1)
                 .map(InputKind::Do),
@@ -700,6 +918,19 @@ impl Walk<'_> {
                 child(&path, "ret"),
                 depth + 1,
             )?),
+            "expect" => {
+                let value = self.input(field(node, "expect"), child(&path, "expect"), depth + 1);
+                let eq = node
+                    .get("eq")
+                    .map(|eq| self.input(eq, child(&path, "eq"), depth + 1));
+                InstructionKind::Expect(Box::new(Expect {
+                    value: value?,
+                    eq: match eq {
+                        Some(eq) => Some(eq?),
+                        None => None,
+                    },
+                }))
+            }
             _ => {
                 // "if" or "for". An `el` on a loop is already an unknown
                 // field, but it's checked all the same.

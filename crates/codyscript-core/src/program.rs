@@ -7,16 +7,31 @@ use std::sync::Arc;
 
 use crate::executor::Executor;
 use crate::expression::Ast;
+use crate::types::{Type, TypeDef};
 use crate::value::Value;
 
-/// A whole program: the input that runs, and the CodyScript functions
-/// (`fn`) it may call. External functions (`ext`) need nothing here: a call
-/// to one names its executor.
+/// A whole program: the input that runs, the CodyScript functions (`fn`) it
+/// may call, the types it declares (`types`) and its tests (`tests`).
+/// External functions (`ext`) need nothing here: a call to one names its
+/// executor.
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
     pub body: Input,
     /// Every function, in the order written; calls hold an index.
     pub functions: Vec<Function>,
+    /// Every type it declares, in the order written; a type names one by
+    /// index.
+    pub types: Vec<TypeDef>,
+    /// Its tests, in the order written.
+    pub tests: Vec<Test>,
+}
+
+/// One of the program's tests (`tests`): a program of its own, run on its
+/// own, that passes if it runs to the end.
+#[derive(Clone, Debug)]
+pub(crate) struct Test {
+    pub name: String,
+    pub body: Input,
 }
 
 /// One of the program's own functions (`fn`).
@@ -54,6 +69,21 @@ pub(crate) enum InputKind {
     Obj(Vec<(Arc<str>, Input)>),
     /// `list`: a list of the items' values, in order.
     List(Vec<Input>),
+    /// `is` or `problems`: a value checked against a type. Boxed, as the
+    /// type may be large.
+    Check(Box<Check>),
+    /// `run`: in a test, the program run with these variables.
+    Run(Vec<(Arc<str>, Input)>),
+}
+
+/// `is` (whether a value is a type) or `problems` (what's wrong with it as
+/// one).
+#[derive(Clone, Debug)]
+pub(crate) struct Check {
+    pub value: Input,
+    pub ty: Type,
+    /// `problems`, rather than `is`.
+    pub problems: bool,
 }
 
 #[derive(Clone)]
@@ -116,4 +146,15 @@ pub(crate) enum InstructionKind {
         test: Input,
         body: Vec<Instruction>,
     },
+    /// `expect`: fails the run unless the value is `true` — or, with `eq`,
+    /// equal to `eq`'s. Boxed, as an instruction is as big as its biggest
+    /// kind: inline, its two inputs would make every instruction bigger.
+    Expect(Box<Expect>),
+}
+
+/// An `expect`'s inputs.
+#[derive(Clone, Debug)]
+pub(crate) struct Expect {
+    pub value: Input,
+    pub eq: Option<Input>,
 }

@@ -11,12 +11,13 @@ pub mod executor;
 mod expression;
 mod program;
 mod run;
+mod types;
 mod validate;
 pub mod value;
 
 pub use config::RunConfig;
 pub use engine::{
-    CompiledProgram, Engine, EngineBuilder, Limits, RunOptions, RunResult, Variables,
+    CompiledProgram, Engine, EngineBuilder, Limits, RunOptions, RunResult, Test, Variables,
 };
 pub use error::{BoxError, Cause, Details, Error, ErrorCode, Issue};
 pub use executor::{BoxFuture, Executor, ExecutorCall, ExecutorFuture, ExecutorResult, Signal};

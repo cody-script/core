@@ -81,8 +81,8 @@ its answer, which may come from a promise — when a person clicks, say:
 ```js
 const config = '{ "variables": { "Name": " Ada " }, "breakpoints": [{ "tag": "name-required" }] }';
 const outcome = JSON.parse(await debug(programJson, config, executors, "", (pause) => {
-  // pause: { reason, path, kind, name?, tag?, function?, depth, steps, breakpoints,
-  //          frames: [{ function?, call?, scopes: [{…}, …] }, …] }
+  // pause: { reason, path, kind, name?, tag?, function?, test?, depth, steps,
+  //          breakpoints, frames: [{ function?, call?, scopes: [{…}, …] }, …] }
   show(pause);                                  // your UI
   return new Promise((resolve) => (onClick = resolve));   // "step_over", …
 }));
@@ -92,7 +92,7 @@ A run configuration is `{ "variables"?: {…}, "breakpoints"?: [{ "tag": … }
 or { "path": … }, …] }`; `runConfigSchema()` is its JSON Schema. A
 breakpoint names the steps with a tag, or the step at a path, as
 `steps(program, executors, limits)` lists them —
-`{"ok":true,"steps":[{ path, kind, name?, tag?, function?, depth }, …]}`;
+`{"ok":true,"steps":[{ path, kind, name?, tag?, function?, test?, depth }, …]}`;
 prefer tags, which edits to the program don't move. A breakpoint that names
 no step makes the outcome an `invalid_config` error; `check(program, config,
 executors, limits)` says so without running (`{"ok":true}` or
@@ -104,6 +104,32 @@ actions it's given take it (`"step"`); with no breakpoints, never. Answer
 with an `aborted` error), or `{ action, breakpoints }` to replace the
 breakpoints too. It resolves as `run` does, and also rejects if `config`
 isn't a run configuration, or `onPause` throws or answers anything else.
+
+### Types and tests
+
+A program may declare types (`"types": { "Todo": { "obj": { "title":
+"string", "done": "boolean?" } } }`) and carry tests of itself (`"tests":
+{ "fees stop at 300": { "do": [{ "expect": …, "eq": 300 }] } }`); see the
+core's README. From JavaScript, each takes the program, executors and
+limits as `run` does:
+
+```js
+JSON.parse(tests(programJson, executors, ""));        // { ok: true, tests: ["fees stop at 300", …] }
+const outcome = JSON.parse(await test(programJson, "fees stop at 300", "", executors, ""));
+if (!outcome.ok) console.error(outcome.error.message); // "Expected 300, got 301 at /tests/…"
+JSON.parse(problems(programJson, "Todo", rowJson, executors, ""));
+// { ok: true, problems: [{ path: "/done", message: "Expected a boolean or null, got number" }] }
+```
+
+`test(program, name, variables, executors, limits)` runs one test: it
+passed if the outcome is `ok`, and a failing `expect` is an
+`expectation_failed` error at it. Give each test fresh executors — a
+database of its own, say — by passing new ones to each call. `debugTest(program,
+name, config, executors, limits, onPause)` debugs one, as `debug` does a
+program. `problems(program, type, value, executors, limits)` checks a
+value (JSON text) against one of the program's types — `problems` is
+empty if it is one. Both throw (or reject) if the program has no such
+test or type.
 
 The language itself — nodes, expressions, errors and limits — is documented
 in the [core's README](https://github.com/cody-script/core/tree/main/crates/codyscript-core#readme).

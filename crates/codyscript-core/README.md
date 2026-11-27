@@ -53,13 +53,15 @@ list is always a node — only numbers, strings, booleans and `null` stand for
 themselves — so a constant object is wrapped in `val`, and nothing inside
 `val` is read as a node; to build one from computed values, use `obj` or
 `list`, inside which every value is an input. An input has exactly one of
-`val`, `ref`, `x`, `call`, `do`, `obj`, `list`; an instruction exactly one
-of `set`, `ret`, `if`, `for`.
+`val`, `ref`, `x`, `call`, `do`, `obj`, `list`, `is`, `problems`, `run`; an
+instruction exactly one of `set`, `ret`, `if`, `for`, `expect`.
 
 **A program is an input** — usually a block — and what it produces is the
-run's value. Its root node may also carry two fields, and only it: `fn`,
+run's value. Its root node may also carry four fields, and only it: `fn`,
 the functions the program defines in CodyScript, and `ext`, the external
-functions it uses from the host ([Functions](#functions)).
+functions it uses from the host ([Functions](#functions)); `types`, what
+its data looks like ([Types](#types)); and `tests`, programs that test it
+([Tests](#tests)).
 
 ### Inputs — produce a value
 
@@ -73,6 +75,9 @@ functions it uses from the host ([Functions](#functions)).
 | `do` | `{ "do": [<instruction>…] }` | A block: runs in a new scope; its value is what it `ret`urns, else `null`. |
 | `obj` | `{ "obj": { "name": <input>, … } }` | An object of the inputs' values, keys in the order written. |
 | `list` | `{ "list": [<input>…] }` | A list of the inputs' values. |
+| `is` | `{ "is": <input>, "type": <type> }` | Whether the value is of the [type](#types): `true` or `false`. |
+| `problems` | `{ "problems": <input>, "type": <type> }` | What's wrong with the value as one: a list of `{ "path", "message" }`, empty if it is one. |
+| `run` | `{ "run": { "name": <input>, … } }` | In a [test](#tests) only: runs the program with these variables; its value is what the program returns. |
 
 **Building data.** `val` is a constant: `{ "val": { "status": 200 } }` is
 that object, and nothing inside it is read. `obj` and `list` build from
@@ -104,6 +109,7 @@ as written, is only for external ones.
 | `ret` | `{ "ret": <input> }` | Ends the enclosing block with that value. |
 | `if` | `{ "if": <input>, "do": […], "el"?: […] }` | Runs `do` if the test is `true`, else `el`. The test must be a boolean. |
 | `for` | `{ "for": <input>, "do": […] }` | Runs `do` while the test is `true`. The test must be a boolean. |
+| `expect` | `{ "expect": <input>, "eq"?: <input> }` | Fails the run with `expectation_failed` unless the value is `true` — or, with `eq`, equal to `eq`'s ([Tests](#tests)). |
 
 ### Expressions
 
@@ -226,6 +232,145 @@ side at the program's root:
   any of these is an `invalid_program`, at the node. Errors inside a
   function point into it (`/fn/fee/do/1/if`).
 
+### Types
+
+A program can say what its data looks like. The root's `types` declares
+types by name, each written in the shape of the data it describes; `is`
+and `problems` check a value against one — or against a type written in
+place — and a host can check values against them before running anything
+([Host API](#host-api)). A handler that answers bad input with what's wrong
+with it:
+
+```json
+{
+  "types": {
+    "Todo": { "obj": {
+      "title": "string",
+      "done": "boolean",
+      "tags": { "list": "string" },
+      "due": "string?",
+      "owner": "Person?"
+    } },
+    "Person": { "obj": { "name": "string", "manager": "Person?" } }
+  },
+  "do": [
+    { "if": { "is": { "ref": "body" }, "type": "Todo" },
+      "do": [{ "ret": { "obj": { "status": 201, "todo": { "ref": "body" } } } }] },
+    { "ret": { "obj": {
+        "status": 400,
+        "problems": { "problems": { "ref": "body" }, "type": "Todo" }
+    } } }
+  ]
+}
+```
+
+With `body` `{ "title": 7, "tags": ["a", 2], "urgent": true }`, it returns
+status 400 and these problems, each with a JSON Pointer into the value:
+
+```text
+/urgent   Unknown field "urgent"
+          Missing field "done"
+/title    Expected a string, got number
+/tags/1   Expected a string, got number
+```
+
+| Type | Is |
+|---|---|
+| `"any"` | Anything, `null` included. |
+| `"null"` | `null`. |
+| `"boolean"`, `"number"`, `"string"` | That kind of value. |
+| `"integer"` | A whole number: `2`, or `2.0`. |
+| `"list"`, `"object"` | Any list; any object. |
+| `"Todo"` | A type the program declares in `types`. |
+| `"T?"` | A `T`, or `null`; as an object's field, one that may also be left out. |
+| `{ "obj": { "field": <type>, … } }` | An object with these fields, and no others. |
+| `{ "list": <type> }` | A list whose every item is one. |
+| `{ "map": <type> }` | An object whose every field's value is one, whatever the field's name. |
+
+- **Objects are strict**: a field the type doesn't list is a problem
+  (`Unknown field "urgent"`), as is one it lists that's missing, unless
+  it's optional — so a misspelt field is caught rather than ignored, as in
+  programs themselves. For objects with any fields, use `object` or `map`.
+- **Types name each other, and themselves**, in any order: a `Person` has
+  a `manager` who is a `Person` (or `null`). Only through an `obj`, `list`
+  or `map`, though: `"A": "B", "B": "A?"` describes nothing, and is
+  refused. A declared type's name is any non-empty text that doesn't end in
+  `?` and isn't a built-in type's; a name a type uses that's neither is an
+  `invalid_program` (`Unknown type "Persn"`), at its place.
+- **Checking** gives each problem as `{ "path", "message" }`, in the order
+  found: in an object, unknown fields, then missing ones, then what's in
+  each field it has, in the order its type lists them; a list's items in
+  order. A check stops after 100. Types describe values; they don't
+  convert them: `"5"` isn't a `number`.
+- **A check is steps**: one for each value it looks at, so checking a large
+  value is bounded by `max_steps` like anything else. It walks the value
+  with a stack of its own, so no value is too deep to check.
+
+### Tests
+
+A program can carry its own tests, in the same document: the root's
+`tests`, by name, each a program of its own — any input, usually a block.
+A test calls the program's functions, and the host's, runs the program
+itself with `run`, and says what it expects with `expect`. **A test passes
+if it runs to the end**; an `expect` that doesn't hold fails it, as any
+other error would. Whatever runs the program can run its tests: an editor,
+CI, a host before it puts a new version to work.
+
+```json
+{
+  "fn": {
+    "fee": { "do": [
+      { "set": { "fee": { "x": "amount * rate" } } },
+      { "if": { "x": "fee > 300" }, "do": [{ "ret": 300 }] },
+      { "ret": { "ref": "fee" } }
+    ] }
+  },
+  "tests": {
+    "a fee is the rate's share": { "do": [
+      { "expect": { "call": { "fee": { "amount": 1000, "rate": 0.03 } } }, "eq": 30 }
+    ] },
+    "fees stop at 300": { "do": [
+      { "expect": { "call": { "fee": { "amount": 20000, "rate": 0.03 } } }, "eq": 300 }
+    ] },
+    "the program charges 3%": { "do": [
+      { "set": { "charged": { "run": { "Amount": 1000 } } } },
+      { "expect": { "x": "charged == 30" } }
+    ] }
+  },
+  "do": [
+    { "ret": { "call": { "fee": { "amount": { "ref": "Amount" }, "rate": 0.03 } } } }
+  ]
+}
+```
+
+- **`expect`** — `{ "expect": <input> }` needs `true` (a value that isn't
+  a boolean is a `type_error`); with `eq`, the two values must be equal:
+  numbers by value (`2` and `2.0`), lists item by item, objects field by
+  field in any order. Otherwise the run fails with `expectation_failed` at
+  the `expect`, saying what it expected and what it got — `Expected 300,
+  got 301` — with values written as JSON, cut short past 120 characters.
+  It's an instruction like any other, so a program or a function may use
+  one too, to fail loudly when something that must hold doesn't.
+- **`run`** runs the program, from a test, with only the variables it
+  names — resolved in order, like a call's arguments — in a scope of its
+  own, as a function call does: the program sees none of the test's
+  variables, nor the test the program's. Its value is what the program
+  returns. A test may run the program as often as it likes; only a test may
+  `run` (anywhere else it's an `invalid_program`), so a program never runs
+  itself.
+- **A test runs as the program does**: with the host's executors — so it
+  can call any function the program declares, and nothing else — and the
+  variables, limits and debugger it's given. Its top-level assignments come
+  back as `variables`; its paths start with `/tests/<name>`, in errors and
+  breakpoints (`/` in a name is `~1`, as in any JSON Pointer).
+- **The host runs them** ([Host API](#host-api)), each on its own: tests
+  share nothing, so they may run in any order, or at once. To give each its
+  own executors — a fresh database, say — compile the program with an
+  engine built for that test.
+- **Tests don't change the program**: running it never runs them, and it
+  behaves exactly as it would without them. A test's name is any non-empty
+  text.
+
 ### Semantics
 
 - **Values** are `null`, booleans, numbers, strings, lists and objects with
@@ -308,6 +453,13 @@ compiled.run(options).await / compiled.run_blocking(options)
 compiled.steps() -> Vec<debug::Step>                       // what breakpoints name
 compiled.check(&run_config) -> Result<(), Error>           // its breakpoints name steps?
 
+compiled.types() -> impl Iterator<Item = &str>             // the types it declares
+compiled.problems(&value, "Todo") -> Option<Vec<Issue>>    // None: no such type
+compiled.tests() -> impl Iterator<Item = Test>             // its tests, in order
+compiled.test("fees stop at 300") -> Option<Test>
+test.name() -> &str
+test.run(options).await / test.run_blocking(options)       // Ok: it passed
+
 RunOptions::new().with_variables(map).with_signal(signal)  // or RunOptions::from(map)
     .with_debugger(breakpoints, debugger)                   // to debug the run
 RunResult { value: Value, variables: Map, steps: u64 }
@@ -346,7 +498,8 @@ RunResult { value: Value, variables: Map, steps: u64 }
   `aborted`, and executors receive the signal to stop their own work.
 - **Errors** — every failure is a `codyscript_core::Error` with a `code()`
   (`InvalidProgram`, `UnknownFunction`, `UndefinedVariable`, `TypeError`,
-  `FunctionFailed`, `StepLimit`, `DepthLimit`, `Aborted`, `InvalidConfig` —
+  `FunctionFailed`, `StepLimit`, `DepthLimit`, `Aborted`, `InvalidConfig`,
+  `ExpectationFailed` —
   `code().as_str()` gives `"invalid_program"` and so on), a JSON Pointer
   `path()` into the program (for `InvalidConfig`, into the run
   configuration), the node's `tag()`, a `cause()` (an executor's error, an
@@ -360,6 +513,13 @@ RunResult { value: Value, variables: Map, steps: u64 }
 - **Compile once** — compiling is most of the cost of a short run (parsing
   and compiling a small rule takes several times as long as running it), so
   compile a program once and keep the `CompiledProgram` for every run.
+- **Types and tests** — `compiled.problems(&value, name)` checks a value
+  against one of the program's [types](#types), as `problems` does in the
+  program — say, a request's body, before running a handler with it. It
+  counts no steps: the value is the host's. `compiled.tests()` lists the
+  program's [tests](#tests), and `test.run(options)` runs one, as
+  `compiled.run(options)` runs the program: `Ok` means it passed, and a
+  failed `expect` is an `ExpectationFailed` error.
 
 An async executor, a run with variables, and an error:
 
@@ -392,21 +552,53 @@ assert_eq!(error.path(), "/x");
 assert_eq!(error.to_string(), r#"Variable "n" is not defined in "n * 2" at /x"#);
 ```
 
+A program's tests and types, from the host:
+
+```rust
+use codyscript_core::{value, Engine, ErrorCode, RunOptions};
+
+let program = Engine::new().compile(&value!({
+    "types": { "Order": { "obj": { "amount": "number", "note": "string?" } } },
+    "tests": {
+        "charges 3%": { "do": [{ "expect": { "run": { "amount": 1000 } }, "eq": 30 }] },
+        "charges 4%": { "do": [{ "expect": { "run": { "amount": 1000 } }, "eq": 40, "tag": "four" }] }
+    },
+    "x": "amount * 0.03"
+})).unwrap();
+
+// Run every test: one passes if it runs to the end.
+let failed: Vec<_> = program
+    .tests()
+    .filter_map(|test| Some((test.name(), test.run_blocking(RunOptions::new()).err()?)))
+    .collect();
+assert_eq!(failed.len(), 1);
+let (name, error) = &failed[0];
+assert_eq!(*name, "charges 4%");
+assert_eq!(error.code(), ErrorCode::ExpectationFailed);
+assert_eq!(error.to_string(), "Expected 40, got 30 at /tests/charges 4%/do/0 (tag four)");
+
+// Check a value against a type, as a host would a request's body.
+let problems = program.problems(&value!({ "amount": "12" }), "Order").unwrap();
+assert_eq!(problems[0].path, "/amount");
+assert_eq!(problems[0].message, "Expected a number, got string");
+```
+
 ## Debugging
 
 A host can run a program under a **debugger** — host code, usually with a
 person behind it — which pauses it at breakpoints, shows its variables, and
 steps on. It's all in the [`debug`] module.
 
-- **A step is a node**: an instruction (`set`, `ret`, `if`, `for`), or an
-  input (a literal, `val`, `ref`, `x`, `call`, a `do` block, `obj` or
-  `list`) — the nodes
+- **A step is a node**: an instruction (`set`, `ret`, `if`, `for`,
+  `expect`), or an input (a literal, `val`, `ref`, `x`, `call`, a `do`
+  block, `obj`, `list`, `is`, `problems` or `run`) — the nodes
   a run counts as steps. (Operands inside an expression count as steps
   too, but run as part of their `x`: a run never pauses between them.) A
   step is named by its path, as in errors (`/do/1`, `/fn/fee/do/0/set/fee`),
-  and `compiled.steps()` lists every one in the order written, with its kind,
-  what it names (a variable, a function), its tag, the function it's in, and
-  how deeply it's nested.
+  and `compiled.steps()` lists every one in the order written — the
+  body's, each function's, then each test's — with its kind, what it names
+  (a variable, a function, a type), its tag, the function or test it's in,
+  and how deeply it's nested.
 - **Breakpoints** name the steps to pause before: `Breakpoint::tag("cap")`
   names every step tagged `cap`; `Breakpoint::path("/do/1")` the step at
   that path. Prefer tags where steps have them — an editor's node ids are
@@ -430,7 +622,7 @@ steps on. It's all in the [`debug`] module.
   its breakpoints against the program, without running it.
 - **A debugged run** is any run whose options have a debugger:
   `RunOptions::new().with_debugger(breakpoints, debugger)`, then `run` (or
-  `run_blocking`, or `engine.run`) as usual. It pauses before each step a
+  `run_blocking`, or `engine.run`, or a test's `run`) as usual. It pauses before each step a
   breakpoint names, and then wherever the debugger's actions take it —
   nowhere else: not at the start, not at the end, and with no breakpoints,
   never. (Its variables and breakpoints usually come from a `RunConfig`:
@@ -459,9 +651,10 @@ future, so the run can wait as long as a person takes to click; it may keep
 the `Pause` while it waits. `debug::from_fn` makes a debugger from a closure
 that answers at once; for a user interface, implement `Debugger` and resolve
 the future from it (see `codyscript-wasm` for one in JavaScript). A `Pause`
-serializes as `{ reason, path, kind, name?, tag?, function?, depth, steps,
-frames, breakpoints }` — its step's fields, and the rest — ready to send
-one.
+serializes as `{ reason, path, kind, name?, tag?, function?, test?, depth,
+steps, frames, breakpoints }` — its step's fields, and the rest — ready to
+send one. In a test, the program it `run`s is a frame of its own, as a
+function's would be: its `call` is the `run`'s path.
 
 Apart from its pauses, a debugged run is a run: it has the same result,
 steps, limits and errors, and can't change what the program does — a pause
@@ -513,8 +706,8 @@ assert_eq!(seen, [
 ## Safety model
 
 A program can only call the external functions it declares, and only those
-its host's executors provide: **the executors are the whole attack
-surface**, so treat their inputs as untrusted. A program's `ext` lists
+its host's executors provide — its tests too: **the executors are the
+whole attack surface**, so treat their inputs as untrusted. A program's `ext` lists
 everything it can reach outside the sandbox, so a host can read it before
 running anything. The engine refuses malformed or over-deep programs
 before running them, bounds every run by steps, and never evaluates strings
@@ -524,7 +717,8 @@ the engine walks itself.
 No program can overflow the stack. Running one doesn't recurse at all: the
 engine is a loop over explicit stacks, however deep the program, and a
 function call is an entry on those stacks, however deep the recursion; nor
-does evaluating or dropping an expression, however long. Recursion can't
+does evaluating or dropping an expression, however long, or checking a
+value against a type, however deep. Recursion can't
 grow memory without bound either: calls nest at most `max_depth` deep. Only compiling recurses,
 once per nesting level, so `max_depth` — which the host sets and no program
 can exceed — bounds it. At the default of 128, compiling and running the
@@ -544,6 +738,39 @@ Debugging changes none of this: a debugged run has the same limits, and a
 CodyScript began as a port of the TypeScript package `@cody-script/core`;
 since 0.9 it no longer follows it (see below), and earlier notes mention it
 for history only.
+
+### 0.11 → 0.12 (types and tests)
+
+Programs can now say what their data looks like, check values against it,
+and carry their own tests, in the same document. Every 0.11 program means
+what it did, with the same results and steps; only programs 0.11 refused
+change — one message, and `types` and `tests` at the root, which 0.11
+refused as unknown fields. What's new:
+
+- **Types**: the root's `types`, and the `is` and `problems` inputs. See
+  [Types](#types). A host checks values against them with
+  `CompiledProgram::problems`, and lists them with `types()`.
+- **Tests**: the root's `tests`, the `run` input (only in tests), and the
+  `expect` instruction (anywhere). See [Tests](#tests). A host lists them
+  with `CompiledProgram::tests()` or finds one with `test(name)`, and runs
+  one with `Test::run` (or `run_blocking`).
+- **A new error code**, `ErrorCode::ExpectationFailed`
+  (`"expectation_failed"`): an `expect` that doesn't hold. A `match` on
+  `ErrorCode` without a wildcard arm needs it.
+- **Messages**: an input with no type key (or several) now lists `"is"`,
+  `"problems"` and `"run"` among the types expected, and an instruction
+  with none lists `"expect"`.
+- **Debugging**: `debug::NodeKind` has four new variants, `Is`, `Problems`,
+  `Run` and `Expect` (`"is"`, `"problems"`, `"run"`, `"expect"`): a `match`
+  on it without a wildcard arm needs them. `Step` has a new field, `test`,
+  the test a step is part of (serialized when it has one, in a `Pause`
+  too), which a struct literal or a pattern without `..` needs; `steps()`
+  lists each test's steps after the functions'. A `Frame`'s `call` may be
+  a test's `run`.
+- **The schema** (`codyscript-json`) defines `types`, `tests`, `is`,
+  `problems`, `run`, `expect` and types themselves.
+- **JavaScript** (`codyscript-wasm`): `tests`, `test`, `debugTest` and
+  `problems`.
 
 ### 0.10 → 0.11 (reading and building data)
 
